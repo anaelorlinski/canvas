@@ -125,9 +125,7 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 			gradient := style.Fill.Gradient.SetColorSpace(r.colorSpace)
 			r.scanner.Clear()
 			r.scanner.SetColor(rasterx.ColorFunc(func(x, y int) color.Color {
-				p := canvas.Point{(float64(x) + 0.5) / float64(r.resolution), (float64(size.Y-y) - 0.5) / float64(r.resolution)}
-				p = mInv.Dot(p)
-				return gradient.At(p.X, p.Y)
+				return supersampleGradient(gradient, mInv, float64(x), float64(y), float64(size.Y), float64(r.resolution))
 			}))
 			fill.ToScanxScanner(r.scanner, float64(size.Y), r.resolution)
 			r.scanner.Draw()
@@ -154,9 +152,7 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 			gradient := style.Stroke.Gradient.SetColorSpace(r.colorSpace)
 			r.scanner.Clear()
 			r.scanner.SetColor(rasterx.ColorFunc(func(x, y int) color.Color {
-				p := canvas.Point{(float64(x) + 0.5) / float64(r.resolution), (float64(size.Y-y) - 0.5) / float64(r.resolution)}
-				p = mInv.Dot(p)
-				return gradient.At(p.X, p.Y)
+				return supersampleGradient(gradient, mInv, float64(x), float64(y), float64(size.Y), float64(r.resolution))
 			}))
 			stroke.ToScanxScanner(r.scanner, float64(size.Y), r.resolution)
 			r.scanner.Draw()
@@ -168,6 +164,29 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 			r.scanner.Draw()
 		}
 	}
+}
+
+// supersampleGradient evaluates the gradient at 9 sub-pixel positions inside
+// the pixel (x, y) and averages them. This smooths hard color stops in
+// repeating gradients, where single-sample-per-pixel produces visible banding.
+// The 3x3 grid is at sixth-pixel offsets (1/6, 1/2, 5/6), centered on the pixel.
+func supersampleGradient(gradient canvas.Gradient, mInv canvas.Matrix, x, y, sizeY, res float64) color.Color {
+	offsets := [3]float64{1.0 / 6.0, 0.5, 5.0 / 6.0}
+	var rs, gs, bs, as uint32
+	for _, oy := range offsets {
+		for _, ox := range offsets {
+			px := (x + ox) / res
+			py := (sizeY - (y + oy)) / res
+			p := mInv.Dot(canvas.Point{px, py})
+			c := gradient.At(p.X, p.Y)
+			cr, cg, cb, ca := c.RGBA()
+			rs += cr
+			gs += cg
+			bs += cb
+			as += ca
+		}
+	}
+	return color.RGBA64{R: uint16(rs / 9), G: uint16(gs / 9), B: uint16(bs / 9), A: uint16(as / 9)}
 }
 
 // RenderText renders a text object to the canvas using a transformation matrix.
