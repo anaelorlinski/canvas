@@ -879,6 +879,16 @@ type pdfPageWriter struct {
 	textPosition   canvas.Matrix
 	textCharSpace  float64
 	textRenderMode int
+
+	// gsStack mirrors PDF q/Q graphics-state save/restore so the cached
+	// "current state" fields (font, fill, stroke, line, alpha, dashes,
+	// text render mode, char space) stay in sync with the actual stream
+	// state. A `q` saves and a `Q` restores ALL graphics state — without
+	// this stack the cached fields would still hold the inner-scope
+	// values after a `Q`, causing the next SetFont / SetFill / etc. to
+	// short-circuit and skip emitting the operator that would re-apply
+	// the now-inner-scope value.
+	gsStack []gsFrame
 }
 
 // NewPage starts a new page.
@@ -915,6 +925,70 @@ func (w *pdfWriter) NewPage(width, height float64) *pdfPageWriter {
 	m := canvas.Identity.Scale(ptPerMm, ptPerMm)
 	fmt.Fprintf(w.page, " %v %v %v %v %v %v cm", dec(m[0][0]), dec(m[1][0]), dec(m[0][1]), dec(m[1][1]), dec(m[0][2]), dec(m[1][2]))
 	return w.page
+}
+
+// gsFrame is one entry on the q/Q graphics-state stack — a snapshot of
+// every cached field that PDF's `q`/`Q` saves and restores.
+type gsFrame struct {
+	alpha          float64
+	fill           canvas.Paint
+	stroke         canvas.Paint
+	lineWidth      float64
+	lineCap        int
+	lineJoin       int
+	miterLimit     float64
+	dashes         []float64
+	font           *canvas.Font
+	fontSize       float64
+	fontDirection  ctext.Direction
+	textCharSpace  float64
+	textRenderMode int
+}
+
+// pushGraphicsState snapshots cached state to mirror a `q` operator.
+// Call this just before emitting `q`. Pairs with popGraphicsState on `Q`.
+func (w *pdfPageWriter) pushGraphicsState() {
+	w.gsStack = append(w.gsStack, gsFrame{
+		alpha:          w.alpha,
+		fill:           w.fill,
+		stroke:         w.stroke,
+		lineWidth:      w.lineWidth,
+		lineCap:        w.lineCap,
+		lineJoin:       w.lineJoin,
+		miterLimit:     w.miterLimit,
+		dashes:         w.dashes,
+		font:           w.font,
+		fontSize:       w.fontSize,
+		fontDirection:  w.fontDirection,
+		textCharSpace:  w.textCharSpace,
+		textRenderMode: w.textRenderMode,
+	})
+}
+
+// popGraphicsState restores cached state to mirror a `Q` operator. Call
+// this just after emitting `Q`. If the stack is empty (unbalanced Q),
+// it's a no-op — the malformed stream will surface as a renderer bug
+// elsewhere rather than corrupt cached state silently here.
+func (w *pdfPageWriter) popGraphicsState() {
+	n := len(w.gsStack)
+	if n == 0 {
+		return
+	}
+	f := w.gsStack[n-1]
+	w.gsStack = w.gsStack[:n-1]
+	w.alpha = f.alpha
+	w.fill = f.fill
+	w.stroke = f.stroke
+	w.lineWidth = f.lineWidth
+	w.lineCap = f.lineCap
+	w.lineJoin = f.lineJoin
+	w.miterLimit = f.miterLimit
+	w.dashes = f.dashes
+	w.font = f.font
+	w.fontSize = f.fontSize
+	w.fontDirection = f.fontDirection
+	w.textCharSpace = f.textCharSpace
+	w.textRenderMode = f.textRenderMode
 }
 
 func (w *pdfPageWriter) writePage(parent pdfRef) pdfRef {
