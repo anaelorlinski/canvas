@@ -470,6 +470,27 @@ func (r *SVG) RenderText(text *canvas.Text, m canvas.Matrix) {
 	fmt.Fprintf(r.w, `</text>`)
 }
 
+// RenderGroup renders a sub-canvas as an opacity-grouped <g> element,
+// preserving vector content. Implements canvas.RendererWithGroup.
+func (r *SVG) RenderGroup(group *canvas.Canvas, opacity float64, m canvas.Matrix) {
+	if group == nil || group.Empty() || opacity <= 0 {
+		return
+	}
+	fmt.Fprintf(r.w, `<g`)
+	if opacity < 1 {
+		fmt.Fprintf(r.w, ` opacity="%v"`, num(opacity))
+	}
+	if !m.IsIdentity() {
+		fmt.Fprintf(r.w, ` transform="%s"`, m.ToSVG(r.height))
+	}
+	fmt.Fprintf(r.w, `>`)
+	// Render the group's content into self, with the placement
+	// transform already emitted on the wrapping <g>. Pass identity so
+	// child layers inside `group` don't double-apply m.
+	group.RenderViewTo(r, canvas.Identity)
+	fmt.Fprintf(r.w, `</g>`)
+}
+
 // RenderImage renders an image to the canvas using a transformation matrix.
 func (r *SVG) RenderImage(img image.Image, m canvas.Matrix) {
 	size := img.Bounds().Size()

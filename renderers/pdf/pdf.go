@@ -265,3 +265,129 @@ func (r *PDF) RenderText(text *canvas.Text, m canvas.Matrix) {
 func (r *PDF) RenderImage(img image.Image, m canvas.Matrix) {
 	r.w.DrawImage(img, r.opts.ImageEncoding, m)
 }
+
+// RenderPatternFill emits a PDF Tiling Pattern (PatternType 1) for
+// the given tile and uses it as the fill color of the path. The tile
+// stays vector — no rasterization happens for PDF output. Implements
+// canvas.RendererWithPattern.
+//
+// Pipeline: open a tile scope (sub-buffer + own resources), recurse
+// the tile's content into it (with tileView to undo any inherited
+// CTM), close the scope which writes the Pattern resource dict and
+// returns its name. Then on the page: set `/Pattern cs /Pname scn`
+// fill, append the path operators (transformed by m), and `f` (or
+// `f*` for even-odd).
+func (r *PDF) RenderPatternFill(tile *canvas.Canvas, tileW, tileH float64, tileView canvas.Matrix, path *canvas.Path, style canvas.Style, m, patternM canvas.Matrix, evenOdd bool) {
+	if tile == nil || tile.Empty() || tileW <= 0 || tileH <= 0 {
+		return
+	}
+	if r.w.inTextObject {
+		// Patterns can't be referenced inside a BT...ET block.
+		return
+	}
+
+	// Open the tile scope and recurse the tile's vector recording in
+	// pure tile-local coords.
+	scope := r.w.pushTilePatternScope(tileW, tileH)
+	tile.RenderViewTo(r, tileView)
+	// Compose the path's CTM (m, which carries the page's Y-flip and
+	// any element transform) with the pattern placement (patternM).
+	// PDF Pattern Matrix maps tile-local to initial-page-CS; we need
+	// the result to land oriented correctly in user space, which is
+	// what m·patternM gives us.
+	composed := m.Mul(patternM)
+	patternName, ok := r.w.popTilePattern(scope, composed)
+	if !ok {
+		return
+	}
+
+	// On the page, save state, set Pattern colorspace + name, draw the
+	// path transformed by m, fill, restore.
+	r.w.pushGraphicsState()
+	fmt.Fprintf(r.w, " q /Pattern cs /%v scn", patternName)
+	// Apply m so the path coords land in user-space.
+	pathPDF := path.Copy().Transform(m).ToPDF()
+	fmt.Fprintf(r.w, " %s", pathPDF)
+	if evenOdd {
+		fmt.Fprintf(r.w, " f*")
+	} else {
+		fmt.Fprintf(r.w, " f")
+	}
+	fmt.Fprintf(r.w, " Q")
+	r.w.popGraphicsState()
+}
+
+// RenderGroup composites a sub-canvas onto the current page as a PDF
+// Transparency Group (Form XObject with /Group <</S /Transparency>>),
+// applying the given opacity via an ExtGState /ca and /CA. Implements
+// canvas.RendererWithGroup. The group's content stays vector — no
+// rasterization happens for PDF output.
+func (r *PDF) RenderGroup(group *canvas.Canvas, opacity float64, m canvas.Matrix) {
+	if group == nil || group.Empty() || opacity <= 0 {
+		return
+	}
+	if r.w.inTextObject {
+		// Form XObjects can't be referenced inside a BT...ET block.
+		// Practically this case shouldn't happen because RenderText
+		// pairs StartTextObject/EndTextObject and groups wrap whole
+		// drawables, but guard against it.
+		return
+	}
+	w, h := group.Size()
+
+	// Open a Form XObject scope: swap the page's content buffer and
+	// resources/state for a fresh set. All Render* calls executed
+	// while we're in this scope write into the form's content stream
+	// instead of the page's.
+	scope := r.w.pushFormScope(w, h)
+	group.RenderViewTo(r, canvas.Identity)
+	formName, ok := r.w.popFormScope(scope)
+	if !ok {
+		return
+	}
+
+	// On the page: save graphics state, set opacity ExtGState, place
+	// the form via the requested transform, paint it with `Do`,
+	// restore.
+	gs := r.w.getOpacityGS(opacity)
+	r.w.pushGraphicsState()
+	fmt.Fprintf(r.w, " q /%v gs", gs)
+	if m != canvas.Identity {
+		fmt.Fprintf(r.w, " %v %v %v %v %v %v cm",
+			dec(m[0][0]), dec(m[1][0]), dec(m[0][1]),
+			dec(m[1][1]), dec(m[0][2]), dec(m[1][2]))
+	}
+	fmt.Fprintf(r.w, " /%v Do Q", formName)
+	r.w.popGraphicsState()
+}
+
+// PushClip emits PDF's native clip operator. The path is transformed
+// by m, then `q` saves graphics state, the path operators are emitted,
+// and `W`/`W*` followed by `n` clip without painting. The matching
+// PopClip emits `Q` to restore. Implements canvas.RendererWithClip.
+//
+// Clips nest as PDF intersects nested clip regions automatically.
+func (r *PDF) PushClip(path *canvas.Path, m canvas.Matrix, evenOdd bool) {
+	if r.w.inTextObject {
+		// Clip operators are illegal inside BT...ET; in practice this
+		// shouldn't happen because text emits paths via RenderPath
+		// outside the text object when clipping is involved.
+		return
+	}
+	pathPDF := path.Copy().Transform(m).ToPDF()
+	r.w.pushGraphicsState()
+	fmt.Fprintf(r.w, " q %s W", pathPDF)
+	if evenOdd {
+		r.w.Write([]byte("*"))
+	}
+	r.w.Write([]byte(" n"))
+}
+
+// PopClip pops the innermost clip. Must be balanced with PushClip.
+func (r *PDF) PopClip() {
+	if r.w.inTextObject {
+		return
+	}
+	r.w.Write([]byte(" Q"))
+	r.w.popGraphicsState()
+}
