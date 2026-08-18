@@ -483,7 +483,7 @@ func (svg *svgParser) parseDefs(l *xml.Lexer) {
 					stopOpacity := svg.parseNumber(v)
 					stopColor = ToOpacity(stopColor, stopOpacity)
 				}
-				grad.Add(offset, stopColor)
+				grad.AddStop(offset, stopColor, 0)
 			}
 			svg.defs[id] = func(attr string, c *Canvas) {
 				layers := c.layers[c.zindex]
@@ -555,7 +555,7 @@ func (svg *svgParser) parseDefs(l *xml.Lexer) {
 					stopOpacity := svg.parseNumber(v)
 					stopColor = ToOpacity(stopColor, stopOpacity)
 				}
-				grad.Add(offset, stopColor)
+				grad.AddStop(offset, stopColor, 0)
 			}
 
 			svg.defs[id] = func(attr string, c *Canvas) {
