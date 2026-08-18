@@ -108,6 +108,31 @@ func TestPDFText(t *testing.T) {
 	})
 }
 
+// TestPDFTextConvertCFFToTrueType covers the fork's CFF->TrueType embedding
+// path, which doTestPDFText opts out of. There is no stable size to assert
+// against, so this checks the property that motivates the conversion: the
+// OpenType font must embed as a CIDFontType2 with a FontFile2 stream rather
+// than a CIDFontType0 with FontFile3.
+func TestPDFTextConvertCFFToTrueType(t *testing.T) {
+	ebGaramond := canvas.NewFontFamily("eb-garamond")
+	err := ebGaramond.LoadFontFile(fontDir+"EBGaramond12-Regular.otf", canvas.FontRegular)
+	test.Error(t, err)
+
+	garamond10 := ebGaramond.Face(10, canvas.Black, canvas.FontRegular, canvas.FontNormal)
+	rt := canvas.NewRichText(garamond10)
+	rt.WriteFace(garamond10, "garamond")
+
+	buf := &bytes.Buffer{}
+	pdf := New(buf, 210, 297, &Options{Compress: false, SubsetFonts: false})
+	pdf.RenderText(rt.ToText(180, 20.0, canvas.Left, canvas.Top, nil), canvas.Identity.Translate(15, 250))
+	pdf.Close()
+
+	out := buf.String()
+	test.That(t, strings.Contains(out, "/FontFile2"), "expected a FontFile2 (TrueType) stream")
+	test.That(t, !strings.Contains(out, "/FontFile3"), "expected no FontFile3 (CFF) stream")
+	test.That(t, strings.Contains(out, "/CIDFontType2"), "expected a CIDFontType2 descendant font")
+}
+
 func doTestPDFText(t *testing.T, subsetFonts bool, expectedSize int, filename string) {
 	dejaVuSerif := canvas.NewFontFamily("dejavu-serif")
 	err := dejaVuSerif.LoadFontFile(fontDir+"DejaVuSerif.ttf", canvas.FontRegular)
@@ -137,7 +162,18 @@ func doTestPDFText(t *testing.T, subsetFonts bool, expectedSize int, filename st
 		w = io.MultiWriter(buf, f)
 	}
 
-	pdf := New(w, 210, 297, &Options{Compress: false, SubsetFonts: subsetFonts})
+	// The expected sizes assume CFF/OpenType fonts embed as-is, as a
+	// CIDFontType0 with a FontFile3 stream. This fork converts them to
+	// TrueType instead, whose glyf outlines are some 19KB smaller for
+	// EBGaramond, putting the unsubsetted result well outside the tolerance.
+	// Opt out here so these sizes stay directly comparable with upstream's;
+	// TestPDFTextConvertCFFToTrueType covers the conversion path instead.
+	pdf := New(w, 210, 297, &Options{
+		Compress:                 false,
+		SubsetFonts:              subsetFonts,
+		DisableCFFToTrueType:     true,
+		DisableDesubroutinizeCFF: true,
+	})
 
 	pdf.RenderText(text, canvas.Identity.Translate(15, 250))
 

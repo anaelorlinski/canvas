@@ -27,6 +27,8 @@ import (
 	"github.com/tdewolff/canvas/text"
 	ctext "github.com/tdewolff/canvas/text"
 	cfont "github.com/tdewolff/font"
+
+	"github.com/anaelorlinski/otf2ttf-go"
 )
 
 // TODO: Invalid graphics transparency, Group has a transparency S entry or the S entry is null
@@ -65,6 +67,8 @@ type pdfWriter struct {
 	outlines   []pdfOutline
 	compress   bool
 	subset     bool
+	cffToTTF   bool
+	desubCFF   bool
 	title      string
 	subject    string
 	keywords   string
@@ -147,6 +151,8 @@ func newPDFWriterLabel(writer io.Writer, label string) *pdfWriter {
 		images:     map[image.Image]pdfRef{},
 		compress:   true,
 		subset:     true,
+		cffToTTF:   true,
+		desubCFF:   true,
 	}
 
 	w.write("%%PDF-1.7\n%%%s\n", binaryMarker(label))
@@ -161,6 +167,25 @@ func (w *pdfWriter) SetCompression(compress bool) {
 // SeFontSubsetting enables the subsetting of embedded fonts.
 func (w *pdfWriter) SetFontSubsetting(subset bool) {
 	w.subset = subset
+}
+
+// SetCFFToTrueType enables converting CFF/OpenType outlines to TrueType
+// (glyf) so they embed as CIDFontType2 instead of CIDFontType0. Many printer
+// RIPs and PDF interpreters substitute or garble embedded CIDFontType0 (CFF)
+// fonts while rendering CIDFontType2 correctly. The cubic→quadratic outline
+// conversion is bounded at unitsPerEm/1000 and is visually lossless. Disable
+// to embed CFF fonts in their original form. Enabled by default.
+func (w *pdfWriter) SetCFFToTrueType(convert bool) {
+	w.cffToTTF = convert
+}
+
+// SetDesubroutinizeCFF enables inlining Type2 charstring subroutines in
+// CFF/OpenType fonts during subsetting. Many PostScript printer RIPs mishandle
+// subroutines in subsetted CFF fonts embedded as CIDFontType0, producing blank
+// or garbled glyphs. Only relevant when the CFF is embedded as-is, i.e. when
+// conversion to TrueType is disabled or fails. Enabled by default.
+func (w *pdfWriter) SetDesubroutinizeCFF(desubroutinize bool) {
+	w.desubCFF = desubroutinize
 }
 
 // SetTitle sets the document's title.
@@ -457,11 +482,22 @@ func (w *pdfWriter) writeFont(ref pdfRef, font *canvas.Font, vertical bool) {
 			sfnt.CFF.SetGlyphNames(nil)
 		}
 
-		sfntSubset, err := sfnt.Subset(glyphIDs, cfont.SubsetOptions{Tables: cfont.KeepPDFTables})
+		sfntSubset, err := sfnt.Subset(glyphIDs, cfont.SubsetOptions{Tables: cfont.KeepPDFTables, Desubroutinize: w.desubCFF})
 		if err == nil {
 			sfnt = sfntSubset
 		} else {
 			panic("font subsetting failed: " + err.Error())
+		}
+	}
+
+	// Convert CFF outlines to TrueType so the font embeds as a CIDFontType2:
+	// many printer RIPs and PDF interpreters substitute or garble embedded
+	// CIDFontType0 (CFF) fonts while rendering CIDFontType2 correctly. On
+	// conversion failure (e.g. an uninterpretable charstring) the CFF is
+	// embedded as-is, which every desktop viewer renders fine.
+	if sfnt.IsCFF && w.cffToTTF {
+		if ttf, err := otf2ttf.Convert(sfnt, 0.0); err == nil {
+			sfnt = ttf
 		}
 	}
 	fontProgram := sfnt.Write()
@@ -570,11 +606,11 @@ end`)
 	}
 	toUnicodeRef := w.writeObject(toUnicodeStream)
 
-	// write font program
+	// write font program (sfnt may be a TrueType conversion of a CFF font)
 	var cidSubtype string
 	var fontfileKey pdfName
 	var fontfileRef pdfRef
-	if font.SFNT.IsTrueType {
+	if sfnt.IsTrueType {
 		cidSubtype = "CIDFontType2"
 		fontfileKey = "FontFile2"
 		fontfileRef = w.writeObject(pdfStream{
@@ -583,7 +619,7 @@ end`)
 			},
 			stream: fontProgram,
 		})
-	} else if font.SFNT.IsCFF {
+	} else if sfnt.IsCFF {
 		cidSubtype = "CIDFontType0"
 		fontfileKey = "FontFile3"
 		fontfileRef = w.writeObject(pdfStream{
@@ -665,7 +701,7 @@ end`)
 		}
 		cidToGIDMapRef := w.writeObject(cidToGIDMapStream)
 		dict["DescendantFonts"].(pdfArray)[0].(pdfDict)["CIDToGIDMap"] = cidToGIDMapRef
-	} else if font.SFNT.IsTrueType {
+	} else if sfnt.IsTrueType {
 		// CIDs equal the new (subset) glyph IDs; Identity is the spec default
 		// when CIDToGIDMap is absent, but strict RIPs are happier with it
 		// spelled out (matches Acrobat/Affinity output).
