@@ -61,6 +61,11 @@ func (r *PDF) SetInfo(title, subject, keywords, author, creator string) {
 	r.w.pdf.SetCreator(creator)
 }
 
+// SetProducer sets the document's producer (defaults to "tdewolff/canvas").
+func (r *PDF) SetProducer(producer string) {
+	r.w.pdf.SetProducer(producer)
+}
+
 // SetLang sets the document's language. It must adhere the RFC 3066 specification on Language-Tag, eg. es-CL.
 func (r *PDF) SetLang(lang string) {
 	r.w.pdf.SetLang(lang)
