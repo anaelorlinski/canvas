@@ -82,9 +82,32 @@ type Gradient interface {
 }
 
 // Stop is a color and offset for gradient patterns.
+//
+// N is the interpolation exponent for the gap that STARTS at this stop (i.e.
+// from this stop to the next one). It implements CSS Images 3 "color
+// transition hints" (`linear-gradient(red, 30%, blue)` — the bare 30% shifts
+// the transition midpoint), which are exponential rather than linear:
+//
+//	color(t) = lerp(this, next, t ^ N)     with t the 0..1 fraction across the gap
+//
+// N == 0 is the sentinel for "unset" and is treated as N = 1 (plain linear
+// interpolation), so ordinary gradients need not set it. A hint at normalized
+// position H within the gap gives N = ln(0.5)/ln(H) (H = 0.5 → N = 1 → linear).
+// Both the raster renderer (Grad.At) and the PDF renderer (Type 2 shading
+// function) honor N, so hints are exact and resolution-independent on both.
 type Stop struct {
 	Offset float64
 	Color  color.RGBA
+	N      float64
+}
+
+// effectiveN returns the interpolation exponent, mapping the 0 sentinel to 1
+// (linear).
+func (s Stop) effectiveN() float64 {
+	if s.N == 0 {
+		return 1
+	}
+	return s.N
 }
 
 // Grad are the colors and offsets for gradient patterns, sorted by offset.
@@ -94,15 +117,35 @@ func NewGradient() Grad {
 	return Grad{}
 }
 
-// Add adds a new color stop to a gradient.
+// Add adds a new color stop to a gradient, replacing any stop already at the
+// same offset. Use AddStop to keep both and get a hard color transition.
 func (g *Grad) Add(t float64, color color.RGBA) {
-	stop := Stop{math.Min(math.Max(t, 0.0), 1.0), rgbaColor(color)}
+	stop := Stop{Offset: math.Min(math.Max(t, 0.0), 1.0), Color: rgbaColor(color)}
 	// insert or replace stop and keep sort order
 	for i := range *g {
 		if Equal((*g)[i].Offset, stop.Offset) {
 			(*g)[i] = stop
 			return
 		} else if stop.Offset < (*g)[i].Offset {
+			*g = append((*g)[:i], append(Grad{stop}, (*g)[i:]...)...)
+			return
+		}
+	}
+	*g = append(*g, stop)
+}
+
+// AddStop appends a color stop, keeping any stop already at the same offset
+// rather than replacing it — two stops at one offset are how CSS and SVG spell
+// a hard color transition (`linear-gradient(red 50%, blue 50%)`). The new stop
+// is ordered after existing ones at that offset, so it wins for t above it.
+//
+// n is the interpolation exponent for the gap that starts at this stop (see
+// Stop.N); pass 0 for plain linear interpolation.
+func (g *Grad) AddStop(t float64, color color.RGBA, n float64) {
+	stop := Stop{math.Min(math.Max(t, 0.0), 1.0), rgbaColor(color), n}
+	// insert stop keeping sort order; allow duplicates for hard edges
+	for i := range *g {
+		if stop.Offset < (*g)[i].Offset {
 			*g = append((*g)[:i], append(Grad{stop}, (*g)[i:]...)...)
 			return
 		}
@@ -123,6 +166,11 @@ func (g Grad) At(t float64) color.RGBA {
 		if t < after.Offset {
 			before := g[i]
 			t = (t - before.Offset) / (after.Offset - before.Offset)
+			// Apply the gap's interpolation exponent (CSS color transition
+			// hint). before.effectiveN() == 1 for ordinary linear stops.
+			if n := before.effectiveN(); n != 1 {
+				t = math.Pow(t, n)
+			}
 			return colorLerp(before.Color, after.Color, t)
 		}
 	}

@@ -2054,10 +2054,17 @@ func patternGradFunction(grad canvas.Grad) pdfDict {
 }
 
 func patternStopFunction(s0, s1 canvas.Stop) pdfDict {
+	// N is the gap's interpolation exponent: 1 for plain linear stops, or the
+	// CSS color-transition-hint exponent ln(0.5)/ln(H). A PDF Type 2 function
+	// interpolates C0..C1 as t^N, exactly matching the raster Grad.At path.
+	n := s0.N
+	if n == 0 {
+		n = 1
+	}
 	return pdfDict{
 		"FunctionType": 2,
 		"Domain":       pdfArray{0, 1},
-		"N":            1,
+		"N":            n,
 		"C0":           unpremultiplyStop(s0.Color),
 		"C1":           unpremultiplyStop(s1.Color),
 	}
