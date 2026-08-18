@@ -321,6 +321,52 @@ func NewTextLine(face *FontFace, s string, halign TextAlign) *Text {
 
 	ascent, descent, spacing := face.Metrics().Ascent, face.Metrics().Descent, face.Metrics().LineGap
 
+	// If a CSS font-variant-caps value is requested but the font
+	// lacks the corresponding OpenType feature, synthesize the effect.
+	// The CSS value (set via face.Font.SetFeatures) is detected via
+	// the feature tags it contains:
+	//   - small-caps:      smcp                       (lower → small-cap)
+	//   - all-small-caps:  smcp + c2sc                (all   → small-cap)
+	//   - petite-caps:     pcap                       (lower → small-cap)
+	//   - all-petite-caps: pcap + c2pc                (all   → small-cap)
+	//   - unicase:         unic                       (mixed)
+	// Matches Pango's PANGO_VARIANT_*_CAPS synthesis.
+	// Detect synthesized caps: caller asked for one of the
+	// font-variant-caps OpenType features (smcp / c2sc / pcap /
+	// c2pc / unic) by injecting it into Font.features, but the font
+	// doesn't actually carry that feature in its GSUB table. We
+	// match the CSS values:
+	//   small-caps:      smcp                       (lower → small-cap)
+	//   all-small-caps:  smcp + c2sc                (all   → small-cap)
+	//   petite-caps:     pcap                       (lower → petite-cap)
+	//   all-petite-caps: pcap + c2pc                (all   → petite-cap)
+	//   unicase:         unic                       (mixed)
+	// The "all-*" forms are detected by the presence of the c2*
+	// tag; absence picks the lower-only form. Petite is rendered
+	// at a smaller scale than regular small-caps.
+	synthSmallcaps, synthAllCaps := false, false
+	scale := smallcapsScale
+	feats := face.Features
+	switch {
+	case strings.Contains(feats, "c2sc") && !face.Font.HasFeature("c2sc"):
+		synthSmallcaps, synthAllCaps = true, true
+	case strings.Contains(feats, "c2pc") && !face.Font.HasFeature("c2pc"):
+		synthSmallcaps, synthAllCaps = true, true
+		scale = petitecapsScale
+	case strings.Contains(feats, "smcp") && !face.Font.HasFeature("smcp"):
+		synthSmallcaps = true
+	case strings.Contains(feats, "pcap") && !face.Font.HasFeature("pcap"):
+		synthSmallcaps = true
+		scale = petitecapsScale
+	case strings.Contains(feats, "unic") && !face.Font.HasFeature("unic"):
+		synthSmallcaps = true
+	}
+	var smallFace *FontFace
+	if synthSmallcaps {
+		smallFace = face.scaledFace(scale)
+		t.fonts[smallFace.Font] = true
+	}
+
 	i := 0
 	y := 0.0
 	skipNext := false
@@ -335,20 +381,30 @@ func NewTextLine(face *FontFace, s string, halign TextAlign) *Text {
 				x := 0.0
 				ppem := face.PPEM(DefaultResolution)
 				line := line{y: y, spans: []TextSpan{}}
-				for _, item := range itemizeString(s[i:j]) {
-					direction, _ := scriptDirection(HorizontalTB, Natural, item.Script, item.Level, face.Direction)
-					glyphs := face.Font.shaper.Shape(item.Text, ppem, direction, face.Script, face.Language, face.Font.features, face.Font.variations)
-					width := face.textWidth(glyphs)
-					line.spans = append(line.spans, TextSpan{
-						X:         x,
-						Width:     width,
-						Face:      face,
-						Text:      item.Text,
-						Glyphs:    glyphs,
-						Direction: direction,
-						Level:     item.Level,
-					})
-					x += width
+				if synthSmallcaps {
+					// Walk the run and split into pieces of contiguous
+					// upper/lower runs. Each upper piece is shaped at the
+					// full face; each lower piece is uppercased and
+					// shaped at smallFace. With synthAllCaps every char
+					// goes through smallFace (uppercased). Concatenate
+					// the resulting glyph runs with a running X advance.
+					x = appendSmallcapsSpans(face, smallFace, s[i:j], &line, x, ppem, synthAllCaps)
+				} else {
+					for _, item := range itemizeString(s[i:j]) {
+						direction, _ := scriptDirection(HorizontalTB, Natural, item.Script, item.Level, face.Direction)
+						glyphs := face.Font.shaper.Shape(item.Text, ppem, direction, face.Script, face.Language, face.Features, face.Variations)
+						width := face.textWidth(glyphs)
+						line.spans = append(line.spans, TextSpan{
+							X:         x,
+							Width:     width,
+							Face:      face,
+							Text:      item.Text,
+							Glyphs:    glyphs,
+							Direction: direction,
+							Level:     item.Level,
+						})
+						x += width
+					}
 				}
 				if halign == Center || halign == Middle {
 					for k := range line.spans {
@@ -688,7 +744,7 @@ func (rt *RichText) ToText(width, height float64, halign, valign TextAlign, opts
 	glyphs := make([]text.Glyph, 0, len(logRunes))
 	for _, run := range runs {
 		ppem := run.Face.PPEM(DefaultResolution)
-		glyphRun := run.Face.Font.shaper.Shape(run.Text, ppem, run.Direction, run.Script, run.Face.Language, run.Face.Font.features, run.Face.Font.variations)
+		glyphRun := run.Face.Font.shaper.Shape(run.Text, ppem, run.Direction, run.Script, run.Face.Language, run.Face.Features, run.Face.Variations)
 		for i := range glyphRun {
 			glyph := &glyphRun[i]
 			glyph.SFNT = run.Face.Font.SFNT
@@ -1336,4 +1392,99 @@ func (t *Text) renderLineTo(r Renderer, m Matrix, resolution Resolution, index i
 			}
 		}
 	}
+}
+
+
+// Synthesis scale factors. Match Pango's behavior:
+// - small-caps: cap-height of the synthesized glyph approximates the
+//   x-height of the parent face, ~0.85 of size.
+// - petite-caps: smaller still, ~0.7 of size.
+const (
+	smallcapsScale  = 0.85
+	petitecapsScale = 0.7
+)
+
+// scaledFace returns a copy of face scaled to factor × the original
+// size. Used to synthesize small-caps / petite-caps when the
+// underlying font lacks the corresponding OpenType feature.
+func (face *FontFace) scaledFace(factor float64) *FontFace {
+	clone := *face
+	clone.Size = face.Size * factor
+	clone.MmPerEm = clone.Size / float64(face.Font.Head.UnitsPerEm)
+	clone.Variant = FontNormal
+	return &clone
+}
+
+// appendSmallcapsSpans walks `s` in rune order, splits it into
+// contiguous runs of "upper or non-letter" vs "lower-letter", and
+// appends one span per run to `line`. Lower-letter runs are
+// uppercased and shaped at smallFace; the rest are shaped at face.
+// When allCaps is true (e.g. all-small-caps or all-petite-caps),
+// uppercase letters are also routed to smallFace so the entire
+// string renders at the small-cap size. Returns the final x-advance
+// after the appended spans.
+func appendSmallcapsSpans(face, smallFace *FontFace, s string, line *line, x float64, ppem uint16, allCaps bool) float64 {
+	if len(s) == 0 {
+		return x
+	}
+
+	type segment struct {
+		text  string
+		face  *FontFace
+		small bool
+	}
+	var segments []segment
+	var buf strings.Builder
+	curSmall := false
+	flush := func() {
+		if buf.Len() == 0 {
+			return
+		}
+		f := face
+		if curSmall {
+			f = smallFace
+		}
+		segments = append(segments, segment{text: buf.String(), face: f, small: curSmall})
+		buf.Reset()
+	}
+	for _, r := range s {
+		var isSmall bool
+		var emit rune
+		if unicode.IsLower(r) {
+			isSmall = true
+			emit = unicode.ToUpper(r)
+		} else if allCaps && unicode.IsUpper(r) {
+			isSmall = true
+			emit = r
+		} else {
+			isSmall = false
+			emit = r
+		}
+		if buf.Len() > 0 && isSmall != curSmall {
+			flush()
+		}
+		curSmall = isSmall
+		buf.WriteRune(emit)
+	}
+	flush()
+
+	for _, seg := range segments {
+		segPpem := seg.face.PPEM(DefaultResolution)
+		for _, item := range itemizeString(seg.text) {
+			direction, _ := scriptDirection(HorizontalTB, Natural, item.Script, item.Level, seg.face.Direction)
+			glyphs := seg.face.Font.shaper.Shape(item.Text, segPpem, direction, seg.face.Script, seg.face.Language, seg.face.Features, seg.face.Variations)
+			width := seg.face.textWidth(glyphs)
+			line.spans = append(line.spans, TextSpan{
+				X:         x,
+				Width:     width,
+				Face:      seg.face,
+				Text:      item.Text,
+				Glyphs:    glyphs,
+				Direction: direction,
+				Level:     item.Level,
+			})
+			x += width
+		}
+	}
+	return x
 }
