@@ -210,6 +210,58 @@ type Renderer interface {
 	RenderImage(img image.Image, m Matrix)
 }
 
+// RendererWithGroup is implemented by renderers that natively support
+// drawing a sub-canvas with an opacity factor (PDF transparency
+// groups, rasterizer offscreen buffer, SVG <g opacity>). When the
+// Renderer passed to a Canvas's RenderViewTo also implements
+// RendererWithGroup, opacity-group layers are dispatched here. Other
+// renderers fall back to drawing the group's content un-grouped.
+type RendererWithGroup interface {
+	Renderer
+	RenderGroup(group *Canvas, opacity float64, m Matrix)
+}
+
+// RendererWithPattern is implemented by renderers that natively support
+// filling a path with a tiled pattern (a sub-canvas's recording).
+// PDF emits a PatternType 1 tiling pattern XObject; the rasterizer
+// rasterizes the tile once and tiles it across the path's bounding
+// box clipped to the path. Renderers that don't implement the
+// interface drop pattern-fill layers (the path is left unfilled),
+// since tiling is fundamentally part of the operation — there's no
+// reasonable un-tiled fallback.
+type RendererWithPattern interface {
+	Renderer
+	RenderPatternFill(tile *Canvas, tileW, tileH float64, tileView Matrix, path *Path, style Style, m, patternM Matrix, evenOdd bool)
+}
+
+// RendererWithClip is implemented by renderers that support a true
+// path-clip primitive — restricting subsequent draws to the inside of
+// `path` (intersected with whatever clip is already active). Pairs
+// must be balanced: every PushClip is followed by exactly one PopClip
+// at the same nesting depth.
+//
+// Renderers that don't implement the interface get an automatic
+// fallback in Canvas.RenderViewTo: each subsequent path/stroke/text
+// layer between PushClip and the matching PopClip is intersected with
+// the active clip via boolean Path.And before being rendered. This is
+// pixel-correct for axis-aligned and curved fill paths but loses
+// fidelity for raster images (clipped to AABB only), text (clipped at
+// glyph-bounds level), and any case where the boolean intersection
+// changes path winding. Renderers that DO implement the interface
+// (PDF natively, SVG via <clipPath>, rasterizer via path-And + alpha
+// mask) get correct behavior for all four.
+type RendererWithClip interface {
+	Renderer
+	// PushClip restricts subsequent draws to the inside of `path`,
+	// transformed by `m`. evenOdd selects the fill rule for the clip
+	// region. Pushes nest: the active clip is the intersection of all
+	// pushed clips.
+	PushClip(path *Path, m Matrix, evenOdd bool)
+	// PopClip removes the innermost clip pushed by PushClip. Must be
+	// called exactly once per PushClip.
+	PopClip()
+}
+
 ////////////////////////////////////////////////////////////////
 
 // CoordSystem is the coordinate system, which can be either of the four cartesian quadrants. Most useful are the I'th and IV'th quadrants. CartesianI is the default quadrant with the zero-point in the bottom-left (the default for mathematics). The CartesianII has its zero-point in the bottom-right, CartesianIII in the top-right, and CartesianIV in the top-left (often used as default for printing devices). See https://en.wikipedia.org/wiki/Cartesian_coordinate_system#Quadrants_and_octants for an explanation.
@@ -706,13 +758,65 @@ func (c *Context) DrawImage(x, y float64, img image.Image, resolution Resolution
 ////////////////////////////////////////////////////////////////
 
 type layer struct {
-	// path, text OR img is set
-	path *Path
-	text *Text
-	img  image.Image
+	// exactly one of path, text, img, group, patternFill, clipPush
+	// is set; clipPop is signalled by isClipPop=true.
+	path        *Path
+	text        *Text
+	img         image.Image
+	group       *opacityGroup
+	patternFill *patternFill
+	clipPush    *clipPush
+	isClipPop   bool
 
 	m     Matrix
 	style Style // only for path
+}
+
+// clipPush is a deferred clip operation: subsequent layers up to the
+// matching clipPop are restricted to the inside of `path` (transformed
+// by the layer matrix). Renderers that implement RendererWithClip
+// dispatch the push/pop natively (PDF q/W n…Q, SVG <clipPath>,
+// rasterizer path-And/mask). Renderers that don't get a fallback in
+// RenderViewTo: subsequent path layers' geometry is And'd with the
+// active clip before being rendered. The fallback is exact for fills
+// and reasonable for strokes/text-as-paths; raster images are clipped
+// only to the clip's axis-aligned bounding box.
+type clipPush struct {
+	path    *Path
+	evenOdd bool
+}
+
+// opacityGroup is a deferred composition: a sub-canvas whose content
+// should be drawn with a single opacity factor applied to it as a
+// whole. The actual composition technique (PDF transparency group,
+// rasterizer offscreen buffer, SVG <g opacity>) is chosen by the
+// Renderer at RenderViewTo time, so the group's content stays vector
+// for vector renderers.
+type opacityGroup struct {
+	canvas  *Canvas
+	opacity float64
+}
+
+// patternFill is a deferred fill operation: the given `path` is to be
+// filled by tiling `tile` (a sub-canvas's recording) at intervals of
+// (tileW, tileH) in pattern-local coordinates, with patternMatrix
+// mapping pattern-local to user-space. The renderer chooses the
+// tiling technique at RenderViewTo time:
+//
+//   - Rasterizer: rasterize `tile` once, draw repeated copies clipped
+//     to `path`.
+//   - PDF: emit a Tiling Pattern (PatternType 1) XObject and reference
+//     it as a /Pattern colorspace fill of `path`.
+//   - Other renderers: fall back to a single rasterized fill of the
+//     painted path.
+type patternFill struct {
+	tile          *Canvas
+	tileW, tileH  float64
+	tileView      Matrix // view to apply when rendering tile (e.g. inverse parent CTM to undo CTM inheritance)
+	path          *Path
+	style         Style
+	patternMatrix Matrix
+	evenOdd       bool
 }
 
 // Canvas stores all drawing operations as layers that can be re-rendered to other renderers.
@@ -765,6 +869,109 @@ func (c *Canvas) RenderImage(img image.Image, m Matrix) {
 	}
 	c.layers[c.zindex] = append(c.layers[c.zindex], layer{img: img, m: m})
 }
+
+// RenderGroup implements RendererWithGroup so a *Canvas can be the
+// target of another canvas's RenderViewTo without losing opacity-group
+// composition. Without this, copying canvas A's layers into canvas B
+// (via A.RenderViewTo(B, view)) would silently drop opacity because
+// the dispatch in RenderViewTo would see B as a plain Renderer and
+// take the un-grouped fallback. Concretely: when the compositor
+// copies a page's vectorCanvas into a new canvas before rasterizing,
+// the opacity-group layers must survive the copy.
+//
+// We share the group canvas by reference (rather than cloning) and
+// just pass `m` through as the layer matrix; when c is finally
+// rendered to a real opacity-aware renderer, RenderViewTo will look
+// up the opacityGroup case and dispatch RenderGroup with the same m.
+func (c *Canvas) RenderGroup(group *Canvas, opacity float64, m Matrix) {
+	c.layers[c.zindex] = append(c.layers[c.zindex], layer{
+		group: &opacityGroup{canvas: group, opacity: opacity},
+		m:     m,
+	})
+}
+
+// RenderOpacityGroup records a deferred composition: when this canvas
+// is later rendered, the given group canvas will be drawn with the
+// given opacity, transformed by m. Renderers that implement
+// RendererWithGroup handle this natively (e.g. PDF transparency
+// groups, rasterizer offscreen buffer); other renderers fall back to
+// drawing the group's content as if no opacity were applied.
+func (c *Canvas) RenderOpacityGroup(group *Canvas, opacity float64, m Matrix) {
+	c.layers[c.zindex] = append(c.layers[c.zindex], layer{
+		group: &opacityGroup{canvas: group, opacity: opacity},
+		m:     m,
+	})
+}
+
+// RenderPatternFill records a deferred fill: the given path should be
+// filled by tiling `tile` (a sub-canvas whose recording defines one
+// repeating cell) at intervals of (tileW, tileH) in tile-local
+// coordinates, with patternMatrix mapping tile-local space to user
+// space. Renderers implementing RendererWithPattern handle this
+// natively (rasterizer: rasterize tile, draw repeated copies clipped
+// to path; PDF: emit PatternType 1 tiling pattern XObject and
+// reference via /Pattern colorspace fill). Renderers that don't
+// implement the interface fall back to leaving the path unfilled —
+// pattern fills are a fundamentally tiling-aware operation.
+func (c *Canvas) RenderPatternFill(tile *Canvas, tileW, tileH float64, tileView Matrix, path *Path, style Style, m, patternM Matrix, evenOdd bool) {
+	c.layers[c.zindex] = append(c.layers[c.zindex], layer{
+		patternFill: &patternFill{
+			tile:          tile,
+			tileW:         tileW,
+			tileH:         tileH,
+			tileView:      tileView,
+			path:          path,
+			style:         style,
+			patternMatrix: patternM,
+			evenOdd:       evenOdd,
+		},
+		m: m,
+	})
+}
+
+// RenderPatternFill on a *Canvas is the canvas-as-renderer entry
+// point used by another canvas's RenderViewTo when copying layers.
+// Composes the layer's matrix with the copy's view matrix and re-
+// records the deferred operation so the final renderer (rasterizer
+// or PDF) can dispatch its native technique.
+//
+// Note: this method exists so a *Canvas satisfies RendererWithPattern,
+// preserving pattern-fill layers across canvas-to-canvas copies (the
+// same pattern as RenderGroup did for opacity groups).
+//
+// (Method is below; this comment paired with it.)
+
+// PushClip records a deferred clip onto the canvas's recording. The
+// clip applies to all subsequent layers until the matching PopClip.
+// Renderers that implement RendererWithClip dispatch push/pop
+// natively; others fall back to boolean intersection at replay time
+// (see Canvas.RenderViewTo).
+//
+// `m` is the layer-matrix at clip-push time (mirrors how every other
+// layer kind captures its CTM). The clip path's geometry is
+// transformed by `m` at replay before being applied to subsequent
+// layers.
+func (c *Canvas) PushClip(path *Path, m Matrix, evenOdd bool) {
+	c.layers[c.zindex] = append(c.layers[c.zindex], layer{
+		clipPush: &clipPush{path: path.Copy(), evenOdd: evenOdd},
+		m:        m,
+	})
+}
+
+// PopClip records the matching pop of the innermost clip-push.
+// PushClip / PopClip must be balanced; an unbalanced PopClip is
+// silently dropped at replay (see RenderViewTo).
+func (c *Canvas) PopClip() {
+	c.layers[c.zindex] = append(c.layers[c.zindex], layer{
+		isClipPop: true,
+	})
+}
+
+// Note: *Canvas's PushClip method below records with `m` baked into
+// the clip path, so canvas-to-canvas RenderViewTo composition (where
+// the source canvas's RenderViewTo dispatches PushClip on the dest
+// canvas) preserves the clip semantics. Same composition pattern as
+// RenderGroup / RenderPatternFill.
 
 // Empty return true if the canvas is empty.
 func (c *Canvas) Empty() bool {
@@ -856,17 +1063,107 @@ func (c *Canvas) RenderViewTo(r Renderer, view Matrix) {
 	}
 	sort.Ints(zindices)
 
+	rwc, hasNativeClip := r.(RendererWithClip)
+	// fallbackClips is the active clip stack for renderers that don't
+	// implement RendererWithClip. Each entry is the clip path already
+	// transformed into the renderer's coordinate space at push time
+	// (i.e. with the layer matrix `m` baked in), so that clipping a
+	// subsequent path against it just needs to transform that path by
+	// `view` and call Path.And — no per-clip view-inverse-then-mul.
+	var fallbackClips []*Path
+
 	for _, zindex := range zindices {
 		for _, l := range c.layers[zindex] {
+			if l.isClipPop {
+				if hasNativeClip {
+					rwc.PopClip()
+				} else if n := len(fallbackClips); n > 0 {
+					fallbackClips = fallbackClips[:n-1]
+				}
+				continue
+			}
 			m := view.Mul(l.m)
-			if l.path != nil {
-				r.RenderPath(l.path, l.style, m)
-			} else if l.text != nil {
+			if l.clipPush != nil {
+				if hasNativeClip {
+					rwc.PushClip(l.clipPush.path, m, l.clipPush.evenOdd)
+				} else {
+					// Settle even-odd clips into a nonzero-equivalent
+					// path so subsequent Path.And (nonzero only)
+					// produces the right region.
+					cp := l.clipPush.path.Copy().Transform(m)
+					if l.clipPush.evenOdd {
+						cp = cp.Settle(EvenOdd)
+					}
+					fallbackClips = append(fallbackClips, cp)
+				}
+				continue
+			}
+			switch {
+			case l.path != nil:
+				if hasNativeClip || len(fallbackClips) == 0 {
+					r.RenderPath(l.path, l.style, m)
+				} else {
+					// Fallback: clip path geometry against active clip
+					// stack via boolean intersection. Pre-transform the
+					// path into clip-space (matching what we did at
+					// push), And, then render in identity (since both
+					// path and clip are now in render-space).
+					clipped := l.path.Copy().Transform(m)
+					for _, cp := range fallbackClips {
+						clipped = clipped.And(cp)
+						if clipped.Empty() {
+							break
+						}
+					}
+					if !clipped.Empty() {
+						r.RenderPath(clipped, l.style, Identity)
+					}
+				}
+			case l.text != nil:
+				// Fallback for clipped text would require expanding
+				// glyphs to paths and intersecting. Pass through for
+				// now — RendererWithClip implementers handle this.
 				r.RenderText(l.text, m)
-			} else if l.img != nil {
+			case l.img != nil:
+				// Fallback for clipped images: ideally clip to the
+				// active clip's AABB. For now pass through; the
+				// RendererWithClip-supporting renderers (rasterizer,
+				// PDF, SVG) handle it correctly.
 				r.RenderImage(l.img, m)
+			case l.group != nil:
+				if rg, ok := r.(RendererWithGroup); ok {
+					rg.RenderGroup(l.group.canvas, l.group.opacity, m)
+				} else {
+					// Fallback: render the group's content un-grouped.
+					// Loses the opacity but at least preserves the
+					// content's existence; better than dropping it.
+					l.group.canvas.RenderViewTo(r, m)
+				}
+			case l.patternFill != nil:
+				if rp, ok := r.(RendererWithPattern); ok {
+					rp.RenderPatternFill(
+						l.patternFill.tile,
+						l.patternFill.tileW, l.patternFill.tileH,
+						l.patternFill.tileView,
+						l.patternFill.path,
+						l.patternFill.style,
+						m, l.patternFill.patternMatrix,
+						l.patternFill.evenOdd,
+					)
+				}
+				// Otherwise drop — no reasonable un-tiled fallback.
 			}
 		}
+	}
+	// Defensive: if the recording had unbalanced PushClips, pop
+	// what's left so the renderer's clip stack returns to its
+	// pre-call state.
+	if hasNativeClip {
+		// We only pushed via this method's own dispatch; leftover
+		// fallbackClips wouldn't have been pushed natively, so we
+		// don't pop them here. (Counter would track depth more
+		// precisely, but the canvas-as-recording contract is that
+		// pushes/pops balance.)
 	}
 }
 

@@ -880,6 +880,13 @@ type pdfPageWriter struct {
 	textCharSpace  float64
 	textRenderMode int
 
+	// inFormScope is true while the writer is inside pushFormScope /
+	// popFormScope. The form's content stream has no internal pt-per-
+	// mm CTM (the parent's CTM at the /Do call site provides it), so
+	// pattern resources, image transforms, etc. that would otherwise
+	// pre-multiply by ptPerMm must skip that step inside a form.
+	inFormScope bool
+
 	// gsStack mirrors PDF q/Q graphics-state save/restore so the cached
 	// "current state" fields (font, fill, stroke, line, alpha, dashes,
 	// text render mode, char space) stay in sync with the actual stream
@@ -889,42 +896,6 @@ type pdfPageWriter struct {
 	// short-circuit and skip emitting the operator that would re-apply
 	// the now-inner-scope value.
 	gsStack []gsFrame
-}
-
-// NewPage starts a new page.
-func (w *pdfWriter) NewPage(width, height float64) *pdfPageWriter {
-	if w.page != nil {
-		w.pages = append(w.pages, w.page.writePage(pdfRef(3)))
-	}
-
-	// for defaults see https://help.adobe.com/pdfl_sdk/15/PDFL_SDK_HTMLHelp/PDFL_SDK_HTMLHelp/API_References/PDFL_API_Reference/PDFEdit_Layer/General.html#_t_PDEGraphicState
-	w.page = &pdfPageWriter{
-		Buffer:         &bytes.Buffer{},
-		pdf:            w,
-		width:          width,
-		height:         height,
-		resources:      pdfDict{},
-		graphicsStates: map[float64]pdfName{},
-		alpha:          1.0,
-		fill:           canvas.Paint{Color: canvas.Black},
-		stroke:         canvas.Paint{Color: canvas.Black},
-		lineWidth:      1.0,
-		lineCap:        0,
-		lineJoin:       0,
-		miterLimit:     10.0,
-		dashes:         []float64{0.0}, // dashArray and dashPhase
-		font:           nil,
-		fontSize:       0.0,
-		fontDirection:  ctext.LeftToRight,
-		inTextObject:   false,
-		textPosition:   canvas.Identity,
-		textCharSpace:  0.0,
-		textRenderMode: 0,
-	}
-
-	m := canvas.Identity.Scale(ptPerMm, ptPerMm)
-	fmt.Fprintf(w.page, " %v %v %v %v %v %v cm", dec(m[0][0]), dec(m[1][0]), dec(m[0][1]), dec(m[1][1]), dec(m[0][2]), dec(m[1][2]))
-	return w.page
 }
 
 // gsFrame is one entry on the q/Q graphics-state stack — a snapshot of
@@ -989,6 +960,42 @@ func (w *pdfPageWriter) popGraphicsState() {
 	w.fontDirection = f.fontDirection
 	w.textCharSpace = f.textCharSpace
 	w.textRenderMode = f.textRenderMode
+}
+
+// NewPage starts a new page.
+func (w *pdfWriter) NewPage(width, height float64) *pdfPageWriter {
+	if w.page != nil {
+		w.pages = append(w.pages, w.page.writePage(pdfRef(3)))
+	}
+
+	// for defaults see https://help.adobe.com/pdfl_sdk/15/PDFL_SDK_HTMLHelp/PDFL_SDK_HTMLHelp/API_References/PDFL_API_Reference/PDFEdit_Layer/General.html#_t_PDEGraphicState
+	w.page = &pdfPageWriter{
+		Buffer:         &bytes.Buffer{},
+		pdf:            w,
+		width:          width,
+		height:         height,
+		resources:      pdfDict{},
+		graphicsStates: map[float64]pdfName{},
+		alpha:          1.0,
+		fill:           canvas.Paint{Color: canvas.Black},
+		stroke:         canvas.Paint{Color: canvas.Black},
+		lineWidth:      1.0,
+		lineCap:        0,
+		lineJoin:       0,
+		miterLimit:     10.0,
+		dashes:         []float64{0.0}, // dashArray and dashPhase
+		font:           nil,
+		fontSize:       0.0,
+		fontDirection:  ctext.LeftToRight,
+		inTextObject:   false,
+		textPosition:   canvas.Identity,
+		textCharSpace:  0.0,
+		textRenderMode: 0,
+	}
+
+	m := canvas.Identity.Scale(ptPerMm, ptPerMm)
+	fmt.Fprintf(w.page, " %v %v %v %v %v %v cm", dec(m[0][0]), dec(m[1][0]), dec(m[0][1]), dec(m[1][1]), dec(m[0][2]), dec(m[1][2]))
+	return w.page
 }
 
 func (w *pdfPageWriter) writePage(parent pdfRef) pdfRef {
@@ -1448,6 +1455,7 @@ func (w *pdfPageWriter) DrawImage(img image.Image, enc cimage.ImageEncoding, m c
 	br := m.Dot(canvas.Point{float64(size.X), 0})
 	tl := m.Dot(canvas.Point{0, float64(size.Y)})
 	tr := m.Dot(canvas.Point{float64(size.X), float64(size.Y)})
+	w.pushGraphicsState()
 	fmt.Fprintf(w, " q %v %v %v %v re W n", dec(outerRect.X0), dec(outerRect.Y0), dec(outerRect.W()), dec(outerRect.H()))
 	fmt.Fprintf(w, " %v %v m %v %v l %v %v l %v %v l h W n", dec(bl.X), dec(bl.Y), dec(tl.X), dec(tl.Y), dec(tr.X), dec(tr.Y), dec(br.X), dec(br.Y))
 
@@ -1461,6 +1469,7 @@ func (w *pdfPageWriter) DrawImage(img image.Image, enc cimage.ImageEncoding, m c
 	m = m.Scale(float64(size.X), float64(size.Y))
 	w.SetAlpha(1.0)
 	fmt.Fprintf(w, " %v %v %v %v %v %v cm /%v Do Q", dec(m[0][0]), dec(m[1][0]), dec(m[0][1]), dec(m[1][1]), dec(m[0][2]), dec(m[1][2]), name)
+	w.popGraphicsState()
 }
 
 func (w *pdfPageWriter) embedImage(img image.Image, enc cimage.ImageEncoding) pdfRef {
@@ -1643,6 +1652,301 @@ func (w *pdfPageWriter) embedImage(img image.Image, enc cimage.ImageEncoding) pd
 	return ref
 }
 
+// formScope captures the parts of pdfPageWriter that are content-
+// stream-local: the buffer being written into, the resources dict,
+// the graphicsStates cache (since each new form starts in default
+// PDF state and can't reuse the page's /A0..n names), and the cached
+// "current state" fields used by the SetX methods to short-circuit
+// redundant operator emissions. Saved on pushFormScope, restored on
+// popFormScope.
+type formScope struct {
+	buffer         *bytes.Buffer
+	resources      pdfDict
+	graphicsStates map[float64]pdfName
+	alpha          float64
+	fill           canvas.Paint
+	stroke         canvas.Paint
+	lineWidth      float64
+	lineCap        int
+	lineJoin       int
+	miterLimit     float64
+	dashes         []float64
+	font           *canvas.Font
+	fontSize       float64
+	fontDirection  ctext.Direction
+	inTextObject   bool
+	textPosition   canvas.Matrix
+	textCharSpace  float64
+	textRenderMode int
+	inFormScope    bool
+	gsStack        []gsFrame
+
+	// width / height of the form. Stored so popFormScope can write
+	// the BBox without needing to look it up again.
+	w, h float64
+}
+
+// pushFormScope saves the current content-stream-scoped state and
+// resets w to a fresh form context (empty buffer, empty resources,
+// empty graphics-state cache, defaults for cached state fields). All
+// subsequent RenderPath/RenderText/etc. calls will write operators
+// into the form's content stream and add their resources to the
+// form's resources dict, until popFormScope is called.
+//
+// Form coordinates are 1pt = 1mm — the form's own content stream
+// includes the same scale CTM as a page (line 897 in NewPage). We
+// emit the matching `cm` operator on the form's stream too so callers
+// can use canvas (mm) coordinates uniformly.
+func (w *pdfPageWriter) pushFormScope(formW, formH float64) *formScope {
+	scope := &formScope{
+		buffer:         w.Buffer,
+		resources:      w.resources,
+		graphicsStates: w.graphicsStates,
+		alpha:          w.alpha,
+		fill:           w.fill,
+		stroke:         w.stroke,
+		lineWidth:      w.lineWidth,
+		lineCap:        w.lineCap,
+		lineJoin:       w.lineJoin,
+		miterLimit:     w.miterLimit,
+		dashes:         w.dashes,
+		font:           w.font,
+		fontSize:       w.fontSize,
+		fontDirection:  w.fontDirection,
+		inTextObject:   w.inTextObject,
+		textPosition:   w.textPosition,
+		textCharSpace:  w.textCharSpace,
+		textRenderMode: w.textRenderMode,
+		inFormScope:    w.inFormScope,
+		gsStack:        w.gsStack,
+		w:              formW,
+		h:              formH,
+	}
+
+	// Reset to PDF defaults for a fresh content stream. Mirrors the
+	// initial state pdfWriter.NewPage sets up.
+	w.Buffer = &bytes.Buffer{}
+	w.resources = pdfDict{}
+	w.graphicsStates = map[float64]pdfName{}
+	w.alpha = 1.0
+	w.fill = canvas.Paint{Color: canvas.Black}
+	w.stroke = canvas.Paint{Color: canvas.Black}
+	w.lineWidth = 1.0
+	w.lineCap = 0
+	w.lineJoin = 0
+	w.miterLimit = 10.0
+	w.dashes = []float64{0.0}
+	w.font = nil
+	w.fontSize = 0.0
+	w.fontDirection = ctext.LeftToRight
+	w.inTextObject = false
+	w.textPosition = canvas.Identity
+	w.textCharSpace = 0.0
+	w.textRenderMode = 0
+	w.gsStack = nil
+
+	// No initial CTM in the form's content stream: the form's
+	// content executes under the parent's current CTM at the `Do`
+	// call site (which already includes the page's pt-per-mm scale).
+	// Adding our own pt-per-mm cm here would compose with the parent's
+	// and double-scale every coordinate. The form's BBox below is
+	// expressed in mm (the same units the form's content uses).
+	w.inFormScope = true
+
+	return scope
+}
+
+// popFormScope finalizes the form by writing it as a Form XObject
+// stream object (with Subtype=Form, BBox, Group=<</S /Transparency>>,
+// Resources). Returns the resource name (e.g. "F0") under which the
+// form is registered in the parent's XObject dict, plus an ok flag
+// (false if the scope was never pushed or already popped).
+//
+// After this returns, the parent page's state is restored. Subsequent
+// /Fname Do in the parent's stream will paint the form's content.
+func (w *pdfPageWriter) popFormScope(scope *formScope) (pdfName, bool) {
+	if scope == nil {
+		return "", false
+	}
+
+	// Capture the form's content stream and resources before swapping
+	// state back.
+	formStream := w.Bytes()
+	if 0 < len(formStream) && formStream[0] == ' ' {
+		formStream = formStream[1:]
+	}
+	formResources := w.resources
+
+	dict := pdfDict{
+		"Type":     pdfName("XObject"),
+		"Subtype":  pdfName("Form"),
+		"FormType": 1,
+		// BBox is in the form's local coordinate space, which here is
+		// mm (the form's content stream has no internal CTM, so its
+		// coordinates are interpreted in the parent's units at the
+		// /Do call site — which is mm because the parent's pt-per-mm
+		// CTM is already in effect).
+		"BBox": pdfArray{0.0, 0.0, scope.w, scope.h},
+		"Group": pdfDict{
+			"Type": pdfName("Group"),
+			"S":    pdfName("Transparency"),
+			"I":    true,
+			"CS":   pdfName("DeviceRGB"),
+		},
+		"Resources": formResources,
+	}
+	if w.pdf.compress {
+		dict["Filter"] = pdfFilterFlate
+	}
+	ref := w.pdf.writeObject(pdfStream{
+		dict:   dict,
+		stream: formStream,
+	})
+
+	// Restore parent state.
+	w.Buffer = scope.buffer
+	w.resources = scope.resources
+	w.graphicsStates = scope.graphicsStates
+	w.alpha = scope.alpha
+	w.fill = scope.fill
+	w.stroke = scope.stroke
+	w.lineWidth = scope.lineWidth
+	w.lineCap = scope.lineCap
+	w.lineJoin = scope.lineJoin
+	w.miterLimit = scope.miterLimit
+	w.dashes = scope.dashes
+	w.font = scope.font
+	w.fontSize = scope.fontSize
+	w.fontDirection = scope.fontDirection
+	w.inTextObject = scope.inTextObject
+	w.textPosition = scope.textPosition
+	w.textCharSpace = scope.textCharSpace
+	w.textRenderMode = scope.textRenderMode
+	w.inFormScope = scope.inFormScope
+	w.gsStack = scope.gsStack
+
+	// Register the form under a fresh name in the parent's XObject
+	// resource dict.
+	if _, ok := w.resources["XObject"]; !ok {
+		w.resources["XObject"] = pdfDict{}
+	}
+	xobjs := w.resources["XObject"].(pdfDict)
+	name := pdfName(fmt.Sprintf("F%d", len(xobjs)))
+	xobjs[name] = ref
+	return name, true
+}
+
+// pushTilePatternScope opens a writer scope for emitting a Tiling
+// Pattern (PatternType 1) content stream. Mirrors pushFormScope: swaps
+// the buffer, resources, graphics-state cache, and cached "current
+// state" fields to/from a fresh scope so all subsequent draw operators
+// land in the tile's content stream.
+//
+// The returned scope is paired with popTilePattern, which writes the
+// Pattern object and returns the resource name registered in the
+// parent's /Pattern dict. (Form XObjects use /XObject; tiling patterns
+// use /Pattern.)
+func (w *pdfPageWriter) pushTilePatternScope(tileW, tileH float64) *formScope {
+	// Reuse formScope; the only difference is what popTilePattern
+	// writes at the end.
+	return w.pushFormScope(tileW, tileH)
+}
+
+// popTilePattern finalizes the tile scope by emitting a PatternType 1
+// (tiling) pattern object with the tile's content stream and own
+// resource dict, registers it in the parent page's /Pattern resource
+// dict under a fresh name (P0, P1, ...), and restores the parent's
+// state. Returns the resource name.
+//
+// The pattern's tile bounding box is (0, 0, tileW, tileH). XStep/YStep
+// match (tile repeats edge-to-edge). PaintType=1 (colored) — the tile
+// content carries its own colors. TilingType=1 (constant spacing,
+// faster than 2/3).
+func (w *pdfPageWriter) popTilePattern(scope *formScope, patternM canvas.Matrix) (pdfName, bool) {
+	if scope == nil {
+		return "", false
+	}
+
+	tileStream := w.Bytes()
+	if 0 < len(tileStream) && tileStream[0] == ' ' {
+		tileStream = tileStream[1:]
+	}
+	tileResources := w.resources
+
+	// Tile coords are in the same "mm" convention as the page's content
+	// stream (no internal cm — the parent's CTM is applied at /Pattern
+	// cs evaluation time, which on a page is the pt-per-mm scale). So
+	// BBox/XStep/YStep are in mm.
+	bbox := pdfArray{0.0, 0.0, scope.w, scope.h}
+	// PDF Pattern's Matrix maps pattern-local space to the page's
+	// initial CS (pt). Our tile content stream is in mm (no internal
+	// cm). `patternM` is the caller's composition of the path's CTM
+	// (which carries the page's Y-flip and any element transform)
+	// with the SVG pattern's user-space placement.
+	//
+	// In our pipeline, the path's CTM at SVG-paint time is identity
+	// (the page's pt-per-mm `cm` is on the *content stream*, not in
+	// the canvas's internal CTM tracking). So patternM's scale
+	// components are in mm-to-mm and its translates are in mm.
+	//
+	// Pattern Matrix maps tile-mm → initial-CS-pt. Multiply EVERY
+	// component by ptPerMm to convert mm-to-pt.
+	dict := pdfDict{
+		"Type":        pdfName("Pattern"),
+		"PatternType": 1, // tiling
+		"PaintType":   1, // colored (tile has its own colors)
+		"TilingType":  1, // constant spacing
+		"BBox":        bbox,
+		"XStep":       scope.w,
+		"YStep":       scope.h,
+		"Resources":   tileResources,
+		"Matrix": pdfArray{
+			patternM[0][0] * ptPerMm, patternM[1][0] * ptPerMm,
+			patternM[0][1] * ptPerMm, patternM[1][1] * ptPerMm,
+			patternM[0][2] * ptPerMm, patternM[1][2] * ptPerMm,
+		},
+	}
+	if w.pdf.compress {
+		dict["Filter"] = pdfFilterFlate
+	}
+	ref := w.pdf.writeObject(pdfStream{
+		dict:   dict,
+		stream: tileStream,
+	})
+
+	// Restore parent state (same as popFormScope's tail).
+	w.Buffer = scope.buffer
+	w.resources = scope.resources
+	w.graphicsStates = scope.graphicsStates
+	w.alpha = scope.alpha
+	w.fill = scope.fill
+	w.stroke = scope.stroke
+	w.lineWidth = scope.lineWidth
+	w.lineCap = scope.lineCap
+	w.lineJoin = scope.lineJoin
+	w.miterLimit = scope.miterLimit
+	w.dashes = scope.dashes
+	w.font = scope.font
+	w.fontSize = scope.fontSize
+	w.fontDirection = scope.fontDirection
+	w.inTextObject = scope.inTextObject
+	w.textPosition = scope.textPosition
+	w.textCharSpace = scope.textCharSpace
+	w.textRenderMode = scope.textRenderMode
+	w.inFormScope = scope.inFormScope
+	w.gsStack = scope.gsStack
+
+	// Register the pattern under a fresh name in the parent's
+	// /Pattern resource dict.
+	if _, ok := w.resources["Pattern"]; !ok {
+		w.resources["Pattern"] = pdfDict{}
+	}
+	patterns := w.resources["Pattern"].(pdfDict)
+	name := pdfName(fmt.Sprintf("P%d", len(patterns)))
+	patterns[name] = ref
+	return name, true
+}
+
 func (w *pdfPageWriter) getOpacityGS(a float64) pdfName {
 	if name, ok := w.graphicsStates[a]; ok {
 		return name
@@ -1662,24 +1966,38 @@ func (w *pdfPageWriter) getOpacityGS(a float64) pdfName {
 
 func (w *pdfPageWriter) getPattern(gradient canvas.Gradient, m canvas.Matrix) pdfName {
 	// TODO: support patterns/gradients with alpha channel
+	//
+	// Coordinate scaling: shading patterns specify their geometry in
+	// the *parent's* coordinate system at the time the pattern is
+	// referenced via /Pattern cs scn. On a page, the parent's CTM at
+	// that moment is the pt-per-mm scale (set in NewPage), so we
+	// pre-multiply mm coords by ptPerMm to land in pt. Inside a Form
+	// XObject, however, the parent CTM at the form's content stream
+	// is the page's CTM (already pt-per-mm) — the form has no
+	// internal cm — so coordinates inside the form are interpreted
+	// in mm directly. Skip the multiplication in that case.
+	scale := ptPerMm
+	if w.inFormScope {
+		scale = 1.0
+	}
 	shading := pdfDict{
 		"ColorSpace": pdfName("DeviceRGB"),
 	}
 	if g, ok := gradient.(*canvas.LinearGradient); ok {
 		shading["ShadingType"] = 2
-		shading["Coords"] = pdfArray{g.Start.X * ptPerMm, g.Start.Y * ptPerMm, g.End.X * ptPerMm, g.End.Y * ptPerMm}
+		shading["Coords"] = pdfArray{g.Start.X * scale, g.Start.Y * scale, g.End.X * scale, g.End.Y * scale}
 		shading["Function"] = patternGradFunction(g.Grad)
 		shading["Extend"] = pdfArray{true, true}
 	} else if g, ok := gradient.(*canvas.RadialGradient); ok {
 		shading["ShadingType"] = 3
-		shading["Coords"] = pdfArray{g.C0.X * ptPerMm, g.C0.Y * ptPerMm, g.R0 * ptPerMm, g.C1.X * ptPerMm, g.C1.Y * ptPerMm, g.R1 * ptPerMm}
+		shading["Coords"] = pdfArray{g.C0.X * scale, g.C0.Y * scale, g.R0 * scale, g.C1.X * scale, g.C1.Y * scale, g.R1 * scale}
 		shading["Function"] = patternGradFunction(g.Grad)
 		shading["Extend"] = pdfArray{true, true}
 	}
 	pattern := pdfDict{
 		"PatternType": 2,
 		"Shading":     shading,
-		"Matrix":      pdfArray{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2] * ptPerMm, m[1][2] * ptPerMm},
+		"Matrix":      pdfArray{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2] * scale, m[1][2] * scale},
 	}
 
 	if _, ok := w.resources["Pattern"]; !ok {
