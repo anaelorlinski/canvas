@@ -614,6 +614,13 @@ type FontFace struct {
 	Deco    []FontDecorator
 	Hinting font.Hinting
 
+	// Stroke, when non-empty, outlines each glyph in addition to (or
+	// instead of, when Fill is empty) filling it. StrokeWidth is in mm.
+	// Used for SVG <text stroke=...>. When StrokeWidth is 0 no stroke is
+	// applied even if Stroke is set.
+	Stroke      Paint
+	StrokeWidth float64
+
 	// faux styles for bold, italic, and sub- and superscript
 	FauxBold, FauxItalic float64
 	XOffset, YOffset     int32
