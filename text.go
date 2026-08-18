@@ -1321,6 +1321,13 @@ func (t *Text) renderLineTo(r Renderer, m Matrix, resolution Resolution, index i
 			if span.IsText() {
 				style := DefaultStyle
 				style.Fill = span.Face.Fill
+				// Stroke glyphs too when the face requests it (SVG
+				// <text stroke=...>). Fill may be empty (fill:none), in
+				// which case only the outline is drawn.
+				if span.Face.StrokeWidth > 0 && span.Face.Stroke.Has() {
+					style.Stroke = span.Face.Stroke
+					style.StrokeWidth = span.Face.StrokeWidth
+				}
 				r.RenderPath(ps[i], style, m.Translate(xs[i], ys[i]).Rotate(float64(span.Rotation)))
 			} else {
 				for _, obj := range span.Objects {
