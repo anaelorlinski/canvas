@@ -19,6 +19,17 @@ type Options struct {
 	// reproduces the marker this writer has always emitted.
 	BinaryMarkerLabel string
 
+	// DisableCFFToTrueType turns off converting CFF/OpenType outlines to
+	// TrueType (glyf), which otherwise embeds them as CIDFontType2 rather
+	// than CIDFontType0. See pdfWriter.SetCFFToTrueType. The zero value
+	// keeps the conversion enabled.
+	DisableCFFToTrueType bool
+
+	// DisableDesubroutinizeCFF turns off inlining Type2 charstring
+	// subroutines when subsetting CFF/OpenType fonts. See
+	// pdfWriter.SetDesubroutinizeCFF. The zero value keeps it enabled.
+	DisableDesubroutinizeCFF bool
+
 	cimage.ImageEncoding
 }
 
@@ -45,6 +56,8 @@ func New(w io.Writer, width, height float64, opts *Options) *PDF {
 	page := newPDFWriterLabel(w, opts.BinaryMarkerLabel).NewPage(width, height)
 	page.pdf.SetCompression(opts.Compress)
 	page.pdf.SetFontSubsetting(opts.SubsetFonts)
+	page.pdf.SetCFFToTrueType(!opts.DisableCFFToTrueType)
+	page.pdf.SetDesubroutinizeCFF(!opts.DisableDesubroutinizeCFF)
 	return &PDF{
 		w:      page,
 		width:  width,

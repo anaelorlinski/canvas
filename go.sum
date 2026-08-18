@@ -164,8 +164,6 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/tdewolff/argp v0.0.0-20260809175504-e6e95971d4fb h1:CYEGzpyPGyBBIAC6Ul0m/e4nMHnEuAwmYFYUfe8iUpk=
 github.com/tdewolff/argp v0.0.0-20260809175504-e6e95971d4fb/go.mod h1:uuGOKudcV0l0+d8DjP4N6JrhRO78Bc13by6E6QSiPcA=
-github.com/tdewolff/font v0.0.0-20260527091451-1663e68cb8a4 h1:QmSG/RtOlLPJDLJ24XHSDEu4iSgcG+s9sdRg7wTdfpk=
-github.com/tdewolff/font v0.0.0-20260527091451-1663e68cb8a4/go.mod h1:tQzLTuJVLs4Pp6Vxdn3PJ7sAe4gIuph3SBm/BmdlmR0=
 github.com/tdewolff/minify/v2 v2.24.16 h1:1d+IHElvmYM2zJtuykMK/esiqc4H/7pqPKAa7jpSUUU=
 github.com/tdewolff/minify/v2 v2.24.16/go.mod h1:G6yep6HFo3u2eoOcIVBKSNwpoW2wXvPjvnFRj3w1zlc=
 github.com/tdewolff/parse/v2 v2.8.15 h1:3/Psth16LHpsy2NS/7ShXDsoWt1x0f3tQMSbmQi+jO8=

@@ -93,3 +93,11 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	star-tex.org/x/tex v0.7.1
 )
+
+require github.com/anaelorlinski/otf2ttf-go v0.0.0
+
+// not published; resolved locally (the parent module has its own replace)
+replace github.com/anaelorlinski/otf2ttf-go => ../otf2ttf-go
+
+// use the sibling fork (carries SubsetOptions.Desubroutinize); the parent module has its own replace
+replace github.com/tdewolff/font => ../font
