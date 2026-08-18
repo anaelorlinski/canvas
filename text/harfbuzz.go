@@ -49,6 +49,29 @@ func NewShaperSFNT(sfnt *font.SFNT) (Shaper, error) {
 func (s Shaper) Destroy() {
 }
 
+// HasFeature reports whether the shaper's font supports the given
+// 4-byte OpenType feature tag in either GSUB or GPOS. Used by the
+// canvas package to decide whether CSS font-variant-caps must be
+// synthesized (when the font lacks the relevant feature) or can
+// rely on native shaping.
+func (s Shaper) HasFeature(tag string) bool {
+	if s.font == nil || len(tag) != 4 {
+		return false
+	}
+	face := s.font.Face()
+	if face == nil {
+		return false
+	}
+	t := opentype.MustNewTag(tag)
+	if _, ok := face.GSUB.FindFeatureIndex(t); ok {
+		return true
+	}
+	if _, ok := face.GPOS.FindFeatureIndex(t); ok {
+		return true
+	}
+	return false
+}
+
 // Shape shapes the string for a given direction, script, and language.
 func (s Shaper) Shape(text string, ppem uint16, direction Direction, script Script, lang string, features string, variations string) []Glyph {
 	buf := harfbuzz.NewBuffer()
