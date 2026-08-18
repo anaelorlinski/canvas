@@ -95,6 +95,14 @@ func (r *PDF) AddOutline(name string, level int, y float64) {
 	r.w.AddOutline(name, level, y)
 }
 
+// AddOutlinePage adds an outline element targeting an explicit 0-based page
+// index (rather than the current page), so a full document outline can be
+// emitted after all pages have been rendered. y is the FitH scroll position
+// in the target page's coordinate system (mm, bottom-left origin).
+func (r *PDF) AddOutlinePage(name string, level, page int, y float64) {
+	r.w.AddOutlinePage(name, level, page, y)
+}
+
 // Close finished and closes the PDF.
 func (r *PDF) Close() error {
 	return r.w.pdf.Close()
