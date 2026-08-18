@@ -1056,8 +1056,15 @@ func (w *pdfPageWriter) AddLink(uri string, rect canvas.Rect) {
 
 // AddOutline adds an outline element.
 func (w *pdfPageWriter) AddOutline(name string, level int, y float64) {
+	w.AddOutlinePage(name, level, len(w.pdf.pages), y)
+}
+
+// AddOutlinePage adds an outline entry targeting an explicit page index
+// (0-based). Unlike AddOutline it does not bind to the current page, so a
+// document outline can be emitted in one pass after all pages are written.
+func (w *pdfPageWriter) AddOutlinePage(name string, level, page int, y float64) {
 	w.pdf.outlines = append(w.pdf.outlines, pdfOutline{
-		page:   len(w.pdf.pages),
+		page:   page,
 		name:   name,
 		level:  level,
 		y:      y,
