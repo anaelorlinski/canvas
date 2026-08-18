@@ -1265,10 +1265,17 @@ func (t *Text) renderLineTo(r Renderer, m Matrix, resolution Resolution, index i
 			x, y = line.y, -span.X
 		}
 		if resolution != 0.0 && span.Face.Hinting != font.NoHinting && span.Rotation == text.NoRotation && Equal(m[1][0], 0.0) {
-			// grid-align vertically on pixel raster, this improves font sharpness
+			// grid-align vertically on pixel raster, this improves font sharpness.
+			// Snap the GLYPH-TOP edge (baseline + ascent in canvas Y-up) to a
+			// pixel boundary, not the baseline. With non-integer ascent, snapping
+			// the baseline leaves the glyph extents at fractional pixels and
+			// produces AA fringes at row 0/last row. Snapping the top edge keeps
+			// the glyph fully covering whole pixel rows.
 			_, dy := m.Pos()
 			dy += y
-			y += float64(int(dy*resolution.DPMM()+0.5))/resolution.DPMM() - dy
+			top := dy + span.Face.Metrics().Ascent
+			topSnapped := float64(int(top*resolution.DPMM()+0.5)) / resolution.DPMM()
+			y += topSnapped - top
 		}
 		xs[i] = x
 		ys[i] = y

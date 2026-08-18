@@ -779,10 +779,15 @@ func (face *FontFace) RenderTo(r Renderer, m Matrix, s string, resolution Resolu
 func (face *FontFace) renderTo(r Renderer, m Matrix, glyphs []text.Glyph, ppem uint16) {
 	p, width := face.toPath(glyphs, ppem)
 	if ppem != 0 && face.Hinting != font.NoHinting && !m.HasRotation() {
-		// grid-align vertically on pixel raster, this improves font sharpness
+		// grid-align vertically on pixel raster, this improves font sharpness.
+		// Align the glyph-top edge (baseline + ascent, canvas Y-up) rather than
+		// the baseline, matching Text.renderLineTo. The two paths must agree,
+		// or the same string grid-fits differently depending on whether it is
+		// drawn through Text or through FontFace directly.
 		dpmm := float64(ppem) / face.MmPerEm / float64(face.Font.Head.UnitsPerEm)
 		_, y := m.Pos()
-		m = m.Translate(0.0, float64(int(y*dpmm+0.5))/dpmm-y)
+		top := y + face.Metrics().Ascent
+		m = m.Translate(0.0, float64(int(top*dpmm+0.5))/dpmm-top)
 	}
 	if face.Deco != nil {
 		for _, deco := range face.Deco {
