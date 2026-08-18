@@ -1090,6 +1090,7 @@ func (w *pdfPageWriter) SetFill(fill canvas.Paint, m canvas.Matrix) {
 	if fill.IsPattern() {
 		// TODO
 	} else if fill.IsGradient() {
+		w.setGradientAlpha(fill.Gradient, m)
 		fmt.Fprintf(w, " /Pattern cs /%v scn", w.getPattern(fill.Gradient, m))
 	} else {
 		a := float64(fill.Color.A) / 255.0
@@ -1112,7 +1113,7 @@ func (w *pdfPageWriter) SetStroke(stroke canvas.Paint, m canvas.Matrix) {
 	if stroke.IsPattern() {
 		// TODO
 	} else if stroke.IsGradient() {
-		// TODO: should we unset CS?
+		w.setGradientAlpha(stroke.Gradient, m)
 		fmt.Fprintf(w, " /Pattern CS /%v SCN", w.getPattern(stroke.Gradient, m))
 	} else {
 		a := float64(stroke.Color.A) / 255.0
@@ -2024,6 +2025,54 @@ func (w *pdfPageWriter) getPattern(gradient canvas.Gradient, m canvas.Matrix) pd
 	return name
 }
 
+// patternStopAlphaFunction is patternStopFunction's twin for the alpha channel:
+// one output component, the stops' alpha, so the same interpolation (and the
+// same transition-hint exponent) drives the soft mask that drives opacity.
+func patternStopAlphaFunction(s0, s1 canvas.Stop) pdfDict {
+	n := s0.N
+	if n == 0 {
+		n = 1
+	}
+	return pdfDict{
+		"FunctionType": 2,
+		"Domain":       pdfArray{0, 1},
+		"N":            n,
+		"C0":           pdfArray{float64(s0.Color.A) / 255.0},
+		"C1":           pdfArray{float64(s1.Color.A) / 255.0},
+	}
+}
+
+// patternGradAlphaFunction stitches the per-gap alpha functions exactly as
+// patternGradFunction stitches the colour ones, so the mask and the colour
+// shading agree stop for stop.
+func patternGradAlphaFunction(grad canvas.Grad) pdfDict {
+	if len(grad) < 2 {
+		return pdfDict{}
+	}
+	fs := pdfArray{}
+	bounds := pdfArray{}
+	encode := pdfArray{}
+	for i := 0; i < len(grad)-1; i++ {
+		fs = append(fs, patternStopAlphaFunction(grad[i], grad[i+1]))
+		if i != 0 {
+			bounds = append(bounds, grad[i].Offset)
+		}
+		encode = append(encode, 0, 1)
+	}
+	if len(fs) == 1 {
+		f := fs[0].(pdfDict)
+		f["Domain"] = pdfArray{grad[0].Offset, grad[len(grad)-1].Offset}
+		return f
+	}
+	return pdfDict{
+		"FunctionType": 3,
+		"Domain":       pdfArray{grad[0].Offset, grad[len(grad)-1].Offset},
+		"Bounds":       bounds,
+		"Encode":       encode,
+		"Functions":    fs,
+	}
+}
+
 func patternGradFunction(grad canvas.Grad) pdfDict {
 	if len(grad) < 2 {
 		return pdfDict{}
@@ -2053,6 +2102,135 @@ func patternGradFunction(grad canvas.Grad) pdfDict {
 	}
 }
 
+// gradientStops returns the gradient's stops, or nil for a kind that has none.
+func gradientStops(gradient canvas.Gradient) canvas.Grad {
+	switch g := gradient.(type) {
+	case *canvas.LinearGradient:
+		return g.Grad
+	case *canvas.RadialGradient:
+		return g.Grad
+	}
+	return nil
+}
+
+// gradientUniformAlpha reports the single alpha shared by every stop. When the
+// stops disagree there is no such value and the caller needs a soft mask.
+func gradientUniformAlpha(gradient canvas.Gradient) (float64, bool) {
+	grad := gradientStops(gradient)
+	if len(grad) == 0 {
+		return 1.0, true
+	}
+	a := float64(grad[0].Color.A) / 255.0
+	for _, s := range grad[1:] {
+		if float64(s.Color.A)/255.0 != a {
+			return 0.0, false
+		}
+	}
+	return a, true
+}
+
+// getSoftMaskGS returns an ExtGState that carries a luminosity soft mask
+// painting the gradient's alpha ramp, for gradients whose stops do not share
+// one alpha.
+//
+// The mask is the same shading geometry in DeviceGray, its function driven by
+// the stops' alpha rather than their colour, painted with `sh` inside a
+// transparency group. Luminosity 1 is opaque and 0 is transparent, so the grey
+// ramp is the alpha ramp. /BC 0 makes everything outside the group's BBox
+// transparent, which is what an unpainted area should be.
+func (w *pdfPageWriter) getSoftMaskGS(gradient canvas.Gradient, m canvas.Matrix) (pdfName, bool) {
+	grad := gradientStops(gradient)
+	if len(grad) < 2 {
+		return "", false
+	}
+
+	// Unlike the colour shading, which is a pattern whose /Matrix maps pattern
+	// space to the page's *default* space and so needs mm pre-multiplied to pt,
+	// this mask is a Form XObject composited under the CTM in effect when its
+	// ExtGState is set. That CTM is the page's base pt-per-mm scale from
+	// NewPage — the only cm this writer emits — so inside the group one unit is
+	// one mm and the geometry goes in unscaled. Scaling here too would apply
+	// pt-per-mm twice and stretch the ramp by 2.83x, leaving the painted area
+	// sampling only its first third.
+	shading := pdfDict{"ColorSpace": pdfName("DeviceGray")}
+	switch g := gradient.(type) {
+	case *canvas.LinearGradient:
+		shading["ShadingType"] = 2
+		shading["Coords"] = pdfArray{g.Start.X, g.Start.Y, g.End.X, g.End.Y}
+	case *canvas.RadialGradient:
+		shading["ShadingType"] = 3
+		shading["Coords"] = pdfArray{g.C0.X, g.C0.Y, g.R0, g.C1.X, g.C1.Y, g.R1}
+	default:
+		return "", false
+	}
+	shading["Function"] = patternGradAlphaFunction(grad)
+	shading["Extend"] = pdfArray{true, true}
+
+	// The group paints the ramp across its whole BBox, in the same mm units.
+	group := pdfDict{
+		"Type":     pdfName("XObject"),
+		"Subtype":  pdfName("Form"),
+		"FormType": 1,
+		"BBox":     pdfArray{0.0, 0.0, w.width, w.height},
+		"Group": pdfDict{
+			"Type": pdfName("Group"),
+			"S":    pdfName("Transparency"),
+			"CS":   pdfName("DeviceGray"),
+		},
+		"Resources": pdfDict{
+			"Shading": pdfDict{pdfName("Sh0"): shading},
+		},
+	}
+	// The mask has to land where the colour shading lands. The colour shading
+	// is placed by the pattern's /Matrix; the mask is painted inside a group
+	// instead, so the same matrix goes on as a cm before `sh`. Without it the
+	// ramp is drawn unmapped and, since the shading extends at both ends, the
+	// painted area samples one flat end of it — a constant opacity across the
+	// whole gradient rather than a ramp.
+	content := fmt.Sprintf("q %v %v %v %v re W n %v %v %v %v %v %v cm /Sh0 sh Q",
+		dec(0.0), dec(0.0), dec(w.width), dec(w.height),
+		dec(m[0][0]), dec(m[1][0]), dec(m[0][1]), dec(m[1][1]), dec(m[0][2]), dec(m[1][2]))
+	if w.pdf.compress {
+		group["Filter"] = pdfFilterFlate
+	}
+	ref := w.pdf.writeObject(pdfStream{dict: group, stream: []byte(content)})
+
+	if _, ok := w.resources["ExtGState"]; !ok {
+		w.resources["ExtGState"] = pdfDict{}
+	}
+	name := pdfName(fmt.Sprintf("M%d", len(w.resources["ExtGState"].(pdfDict))))
+	w.resources["ExtGState"].(pdfDict)[name] = pdfDict{
+		"CA": 1.0,
+		"ca": 1.0,
+		"SMask": pdfDict{
+			"S":  pdfName("Luminosity"),
+			"G":  ref,
+			"BC": pdfArray{0.0},
+		},
+	}
+	return name, true
+}
+
+// setGradientAlpha puts the gradient's opacity into the graphics state before
+// the pattern is selected.
+//
+// Stops that share an alpha need only the constant /ca and /CA. Stops that do
+// not need a soft mask, since a shading carries no alpha of its own.
+func (w *pdfPageWriter) setGradientAlpha(gradient canvas.Gradient, m canvas.Matrix) {
+	if a, uniform := gradientUniformAlpha(gradient); uniform {
+		w.SetAlpha(a)
+		return
+	}
+	if name, ok := w.getSoftMaskGS(gradient, m); ok {
+		fmt.Fprintf(w, " /%v gs", name)
+		// The mask carries the opacity; the constant alpha must not also
+		// scale it, and the writer's cached alpha is now stale.
+		w.alpha = 1.0
+		return
+	}
+	w.SetAlpha(1.0)
+}
+
 func patternStopFunction(s0, s1 canvas.Stop) pdfDict {
 	// N is the gap's interpolation exponent: 1 for plain linear stops, or the
 	// CSS color-transition-hint exponent ln(0.5)/ln(H). A PDF Type 2 function
@@ -2061,12 +2239,24 @@ func patternStopFunction(s0, s1 canvas.Stop) pdfDict {
 	if n == 0 {
 		n = 1
 	}
+	// A fully transparent stop carries no colour of its own — its
+	// premultiplied components are zero, which reads as black. The mask
+	// handles its opacity, so its colour has to come from the stop it is
+	// interpolating with, or `red -> transparent` would darken to black on
+	// the way out instead of simply fading. This is what premultiplied
+	// interpolation gives, spelled out for the two-stop case.
+	c0, c1 := unpremultiplyStop(s0.Color), unpremultiplyStop(s1.Color)
+	if s0.Color.A == 0 && s1.Color.A != 0 {
+		c0 = c1
+	} else if s1.Color.A == 0 && s0.Color.A != 0 {
+		c1 = c0
+	}
 	return pdfDict{
 		"FunctionType": 2,
 		"Domain":       pdfArray{0, 1},
 		"N":            n,
-		"C0":           unpremultiplyStop(s0.Color),
-		"C1":           unpremultiplyStop(s1.Color),
+		"C0":           c0,
+		"C1":           c1,
 	}
 }
 
