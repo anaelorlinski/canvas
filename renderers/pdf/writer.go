@@ -68,6 +68,7 @@ type pdfWriter struct {
 	keywords   string
 	author     string
 	creator    string
+	producer   string
 	lang       string
 }
 
@@ -121,6 +122,11 @@ func (w *pdfWriter) SetAuthor(author string) {
 // SetCreator sets the document's creator.
 func (w *pdfWriter) SetCreator(creator string) {
 	w.creator = creator
+}
+
+// SetProducer sets the document's producer (defaults to "tdewolff/canvas").
+func (w *pdfWriter) SetProducer(producer string) {
+	w.producer = producer
 }
 
 // SetLang sets the document's language.
@@ -742,8 +748,12 @@ func (w *pdfWriter) Close() error {
 	}
 
 	// document info
+	producer := w.producer
+	if producer == "" {
+		producer = "tdewolff/canvas"
+	}
 	info := pdfDict{
-		"Producer":     "tdewolff/canvas",
+		"Producer":     producer,
 		"CreationDate": time.Now().Format("D:20060102150405Z0700"),
 	}
 
