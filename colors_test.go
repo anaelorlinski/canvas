@@ -24,84 +24,84 @@ func TestGradAdd(t *testing.T) {
 			initial:  Grad{},
 			addT:     0.5,
 			addColor: red,
-			want:     Grad{{0.5, red}},
+			want:     Grad{{Offset: 0.5, Color: red}},
 		},
 		{
 			name:     "add at end",
-			initial:  Grad{{0.0, red}},
+			initial:  Grad{{Offset: 0.0, Color: red}},
 			addT:     1.0,
 			addColor: blue,
-			want:     Grad{{0.0, red}, {1.0, blue}},
+			want:     Grad{{Offset: 0.0, Color: red}, {Offset: 1.0, Color: blue}},
 		},
 		{
 			name:     "add at beginning",
-			initial:  Grad{{0.5, red}},
+			initial:  Grad{{Offset: 0.5, Color: red}},
 			addT:     0.0,
 			addColor: blue,
-			want:     Grad{{0.0, blue}, {0.5, red}},
+			want:     Grad{{Offset: 0.0, Color: blue}, {Offset: 0.5, Color: red}},
 		},
 		{
 			name:     "insert in middle maintains sort order",
-			initial:  Grad{{0.0, red}, {1.0, blue}},
+			initial:  Grad{{Offset: 0.0, Color: red}, {Offset: 1.0, Color: blue}},
 			addT:     0.5,
 			addColor: green,
-			want:     Grad{{0.0, red}, {0.5, green}, {1.0, blue}},
+			want:     Grad{{Offset: 0.0, Color: red}, {Offset: 0.5, Color: green}, {Offset: 1.0, Color: blue}},
 		},
 		{
 			name:     "replace existing offset",
-			initial:  Grad{{0.0, red}, {0.5, green}, {1.0, blue}},
+			initial:  Grad{{Offset: 0.0, Color: red}, {Offset: 0.5, Color: green}, {Offset: 1.0, Color: blue}},
 			addT:     0.5,
 			addColor: white,
-			want:     Grad{{0.0, red}, {0.5, white}, {1.0, blue}},
+			want:     Grad{{Offset: 0.0, Color: red}, {Offset: 0.5, Color: white}, {Offset: 1.0, Color: blue}},
 		},
 		{
 			name:     "clamp t below 0",
 			initial:  Grad{},
 			addT:     -0.5,
 			addColor: red,
-			want:     Grad{{0.0, red}},
+			want:     Grad{{Offset: 0.0, Color: red}},
 		},
 		{
 			name:     "clamp t above 1",
 			initial:  Grad{},
 			addT:     1.5,
 			addColor: red,
-			want:     Grad{{1.0, red}},
+			want:     Grad{{Offset: 1.0, Color: red}},
 		},
 		{
 			name:     "add multiple maintains order",
-			initial:  Grad{{0.2, red}, {0.8, blue}},
+			initial:  Grad{{Offset: 0.2, Color: red}, {Offset: 0.8, Color: blue}},
 			addT:     0.4,
 			addColor: green,
-			want:     Grad{{0.2, red}, {0.4, green}, {0.8, blue}},
+			want:     Grad{{Offset: 0.2, Color: red}, {Offset: 0.4, Color: green}, {Offset: 0.8, Color: blue}},
 		},
 		{
 			name:     "add semi-transparent color clips to premultiplied",
 			initial:  Grad{},
 			addT:     0.5,
 			addColor: color.RGBA{255, 0, 0, 128},
-			want:     Grad{{0.5, color.RGBA{128, 0, 0, 128}}},
+			want:     Grad{{Offset: 0.5, Color: color.RGBA{128, 0, 0, 128}}},
 		},
 		{
 			name:     "replace opaque with semi-transparent clips to premultiplied",
-			initial:  Grad{{0.0, red}, {0.5, green}, {1.0, blue}},
+			initial:  Grad{{Offset: 0.0, Color: red}, {Offset: 0.5, Color: green}, {Offset: 1.0, Color: blue}},
 			addT:     0.5,
 			addColor: color.RGBA{0, 255, 0, 64},
-			want:     Grad{{0.0, red}, {0.5, color.RGBA{0, 64, 0, 64}}, {1.0, blue}},
+			want:     Grad{{Offset: 0.0, Color: red}, {Offset: 0.5, Color: color.RGBA{0, 64, 0, 64}}, {Offset: 1.0, Color: blue}},
 		},
 		{
 			name:     "fully transparent color",
-			initial:  Grad{{0.0, red}},
+			initial:  Grad{{Offset: 0.0, Color: red}},
 			addT:     1.0,
 			addColor: color.RGBA{0, 0, 0, 0},
-			want:     Grad{{0.0, red}, {1.0, color.RGBA{0, 0, 0, 0}}},
+			want:     Grad{{Offset: 0.0, Color: red}, {Offset: 1.0, Color: color.RGBA{0, 0, 0, 0}}},
 		},
 		{
 			name:     "mixed transparent stops maintain order",
-			initial:  Grad{{0.0, color.RGBA{255, 0, 0, 200}}, {1.0, color.RGBA{0, 0, 255, 100}}},
+			initial:  Grad{{Offset: 0.0, Color: color.RGBA{255, 0, 0, 200}}, {Offset: 1.0, Color: color.RGBA{0, 0, 255, 100}}},
 			addT:     0.5,
 			addColor: color.RGBA{0, 255, 0, 50},
-			want:     Grad{{0.0, color.RGBA{255, 0, 0, 200}}, {0.5, color.RGBA{0, 50, 0, 50}}, {1.0, color.RGBA{0, 0, 255, 100}}},
+			want:     Grad{{Offset: 0.0, Color: color.RGBA{255, 0, 0, 200}}, {Offset: 0.5, Color: color.RGBA{0, 50, 0, 50}}, {Offset: 1.0, Color: color.RGBA{0, 0, 255, 100}}},
 		},
 	}
 
@@ -283,4 +283,38 @@ func TestRadialGradientAt(t *testing.T) {
 
 func formatRGBA(c color.RGBA) string {
 	return fmt.Sprintf("RGBA{%d, %d, %d, %d}", c.R, c.G, c.B, c.A)
+}
+
+// TestGradAddStopDuplicateOffset pins the difference between Add and AddStop:
+// Add replaces a stop at an existing offset, AddStop keeps both so the pair
+// renders as a hard transition — how CSS and SVG spell
+// `linear-gradient(red 50%, blue 50%)`.
+func TestGradAddStopDuplicateOffset(t *testing.T) {
+	red := color.RGBA{255, 0, 0, 255}
+	green := color.RGBA{0, 255, 0, 255}
+	blue := color.RGBA{0, 0, 255, 255}
+	white := color.RGBA{255, 255, 255, 255}
+
+	g := NewGradient()
+	g.AddStop(0.0, red, 0)
+	g.AddStop(0.5, green, 0)
+	g.AddStop(0.5, blue, 0)
+	g.AddStop(1.0, white, 0)
+	if len(g) != 4 {
+		t.Fatalf("AddStop: got %d stops, want 4 (duplicate offset must be kept)", len(g))
+	}
+	if g[1].Color != rgbaColor(green) || g[2].Color != rgbaColor(blue) {
+		t.Errorf("AddStop: duplicate stops out of order: %v, %v", g[1].Color, g[2].Color)
+	}
+
+	// Add, by contrast, replaces.
+	h := NewGradient()
+	h.Add(0.5, green)
+	h.Add(0.5, blue)
+	if len(h) != 1 {
+		t.Fatalf("Add: got %d stops, want 1 (same offset must replace)", len(h))
+	}
+	if h[0].Color != rgbaColor(blue) {
+		t.Errorf("Add: got %v, want the replacing color %v", h[0].Color, rgbaColor(blue))
+	}
 }
