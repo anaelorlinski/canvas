@@ -284,7 +284,9 @@ func TestPDFTransparentGradientStopNoNaN(t *testing.T) {
 		canvas.Stop{Offset: 1.0, Color: color.RGBA{0, 0, 0, 0}},
 	)
 	test.T(t, fmt.Sprint(fn["C0"]), "[1 0 0]")
-	test.T(t, fmt.Sprint(fn["C1"]), "[0 0 0]")
+	// The transparent stop borrows the colour it interpolates with, so the
+	// pair fades out rather than darkening — see TestPDFGradientAlpha.
+	test.T(t, fmt.Sprint(fn["C1"]), "[1 0 0]")
 }
 
 // TestPDFOpaqueGradientStopsUnchanged guards the other side: an ordinary
@@ -296,4 +298,91 @@ func TestPDFOpaqueGradientStopsUnchanged(t *testing.T) {
 	)
 	test.T(t, fmt.Sprint(fn["C0"]), "[1 0 0]")
 	test.T(t, fmt.Sprint(fn["C1"]), "[0 0 1]")
+}
+
+// TestPDFGradientAlpha covers alpha on gradient stops.
+//
+// A shading's colours come out of its Function and are read in the shading's
+// ColorSpace, and no PDF colour space carries alpha — transparency is a
+// separate mechanism (PDF 1.4 onwards: /ca and /CA in the graphics state, or a
+// soft mask). So the alpha on the stops has to be carried outside the shading.
+//
+// Stops that share an alpha need only the constant. Stops that differ need a
+// luminosity soft mask, which is the same shading in DeviceGray driven by the
+// stops' alpha.
+func TestPDFGradientAlpha(t *testing.T) {
+	render := func(c0, c1 color.RGBA) string {
+		grad := canvas.NewLinearGradient(canvas.Point{0.0, 0.0}, canvas.Point{10.0, 0.0})
+		grad.Add(0.0, c0)
+		grad.Add(1.0, c1)
+
+		buf := &bytes.Buffer{}
+		r := New(buf, 20.0, 20.0, &Options{Compress: false, SubsetFonts: false})
+		style := canvas.DefaultStyle
+		style.Fill = canvas.Paint{Gradient: grad}
+		r.RenderPath(canvas.MustParseSVGPath("M0 0L10 0L10 10L0 10z"), style, canvas.Identity)
+		test.Error(t, r.Close())
+		return buf.String()
+	}
+
+	opaque := color.RGBA{255, 0, 0, 255}
+
+	// Fully opaque stops need neither a constant nor a mask.
+	out := render(opaque, color.RGBA{0, 0, 255, 255})
+	test.That(t, !strings.Contains(out, "/ca "), "an opaque gradient should not set a constant alpha")
+	test.That(t, !strings.Contains(out, "/Luminosity"), "an opaque gradient should not need a soft mask")
+
+	// Stops sharing an alpha take the constant, and still no mask.
+	out = render(color.RGBA{128, 0, 0, 128}, color.RGBA{0, 0, 128, 128})
+	test.That(t, strings.Contains(out, "/ca .50196078"), "a gradient with 50% stops should paint at 50%")
+	test.That(t, !strings.Contains(out, "/Luminosity"), "a uniform alpha needs no soft mask")
+
+	// Differing alphas need the mask: a DeviceGray twin of the shading whose
+	// function runs over the stops' alpha rather than their colour.
+	out = render(opaque, color.RGBA{0, 0, 64, 64})
+	test.That(t, strings.Contains(out, "/S/Luminosity"), "a varying alpha should produce a luminosity soft mask")
+	test.That(t, strings.Contains(out, "/ColorSpace/DeviceGray"), "the mask shading should be DeviceGray")
+	test.That(t, strings.Contains(out, "/C0[1]/C1[.25098039]"), "the mask should ramp 100% -> 25%")
+
+	// Running to a fully transparent stop fades out rather than vanishing (the
+	// old constant-alpha approximation took the minimum, so the whole gradient
+	// went to zero) and keeps its hue rather than darkening: a transparent stop
+	// has no colour of its own, so it borrows the colour it interpolates with.
+	out = render(opaque, color.RGBA{0, 0, 0, 0})
+	test.That(t, strings.Contains(out, "/S/Luminosity"), "fading to transparent needs a soft mask")
+	test.That(t, strings.Contains(out, "/C0[1]/C1[0]"), "the mask should ramp 100% -> 0")
+	test.That(t, strings.Contains(out, "/C0[1 0 0]/C1[1 0 0]"), "the colour should stay red rather than fade to black")
+	test.That(t, !strings.Contains(out, "/ca 0"), "the gradient should not be forced to zero opacity")
+}
+
+// The colour shading and its alpha mask are placed through different
+// mechanisms and so live in different units. The colour shading is a pattern,
+// and a pattern's /Matrix maps pattern space to the page's *default* space, so
+// its geometry is pre-multiplied to pt. The mask is a Form XObject composited
+// under the CTM in effect when its ExtGState is set, which is the page's base
+// pt-per-mm scale, so its geometry stays in mm. Scaling the mask like the
+// pattern applies pt-per-mm twice: the ramp is stretched by 2.83 and the
+// painted area samples only its first third, which reads as a gradient that
+// barely fades at all.
+func TestPDFGradientAlphaMaskGeometry(t *testing.T) {
+	grad := canvas.NewLinearGradient(canvas.Point{0.0, 0.0}, canvas.Point{10.0, 0.0})
+	grad.Add(0.0, color.RGBA{255, 0, 0, 255})
+	grad.Add(1.0, color.RGBA{0, 0, 64, 64})
+
+	buf := &bytes.Buffer{}
+	r := New(buf, 20.0, 20.0, &Options{Compress: false, SubsetFonts: false})
+	style := canvas.DefaultStyle
+	style.Fill = canvas.Paint{Gradient: grad}
+	r.RenderPath(canvas.MustParseSVGPath("M0 0L10 0L10 10L0 10z"), style, canvas.Identity.Translate(5.0, 3.0))
+	test.Error(t, r.Close())
+	out := buf.String()
+
+	// The colour pattern is in pt: 10mm -> 28.346457, 5mm -> 14.173228.
+	test.That(t, strings.Contains(out, "/Coords[0 0 28.346457 0]"), "the colour shading should be placed in pt")
+	test.That(t, strings.Contains(out, "/Matrix[1 0 0 1 14.173228 8.503937]"), "the colour pattern should be placed in pt")
+
+	// The mask is the same geometry left in mm.
+	test.That(t, strings.Contains(out, "/Coords[0 0 10 0]"), "the mask shading should be placed in mm")
+	test.That(t, strings.Contains(out, "1 0 0 1 5 3 cm /Sh0 sh"), "the mask should be placed in mm")
+	test.That(t, strings.Contains(out, "/BBox[0 0 20 20]"), "the mask BBox should be the page in mm")
 }
