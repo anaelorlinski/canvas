@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf16"
 
 	"golang.org/x/text/encoding/charmap"
@@ -73,7 +74,69 @@ type pdfWriter struct {
 	lang       string
 }
 
+// DefaultBinaryMarkerLabel is the label rendered into the header's binary
+// comment by binaryMarker when a caller names none. It reproduces the
+// marker this writer has always emitted, byte for byte.
+const DefaultBinaryMarkerLabel = "Taco"
+
+// minBinaryMarkerRunes is the number of high-code characters the header
+// comment must contain, per PDF 32000-1 §7.5.2.
+const minBinaryMarkerRunes = 4
+
+// highRunes maps ASCII letters to visually similar runes lying above U+007F.
+// Every replacement encodes to UTF-8 as two or more bytes that are each 0x80
+// or greater, which is what makes them count towards the binary marker.
+var highRunes = map[rune]rune{
+	'a': 'ǟ', 'b': 'ƀ', 'c': 'ċ', 'd': 'đ', 'e': 'ē', 'f': 'ƒ', 'g': 'ġ',
+	'h': 'ħ', 'i': 'ī', 'j': 'ĵ', 'k': 'ķ', 'l': 'ł', 'm': 'ɱ', 'n': 'ń',
+	'o': 'ơ', 'p': 'ƥ', 'q': 'ɋ', 'r': 'ŕ', 's': 'ś', 't': 'ŧ', 'u': 'ū',
+	'v': 'ʋ', 'w': 'ŵ', 'x': 'ẋ', 'y': 'ŷ', 'z': 'ż',
+}
+
+// binaryMarker renders an ASCII label as the comment that follows the PDF
+// header. PDF 32000-1 §7.5.2 asks that a file containing binary data put a
+// comment of at least four characters of code 128 or greater directly after
+// the header, so that tools moving the file between systems treat it as
+// binary rather than text. More than four is fine, so the label may be any
+// length.
+//
+// Each letter becomes a look-alike from highRunes, preserving case. Anything
+// with no mapping — digits, spaces, punctuation — is dropped rather than
+// passed through, which both keeps every character binary and guarantees the
+// result can never contain the EOL that would end the comment early. A label
+// that maps to fewer than the required four characters is cycled until it
+// reaches them, so the marker is valid for any input.
+func binaryMarker(label string) string {
+	var marked []rune
+	for _, r := range label {
+		high, ok := highRunes[unicode.ToLower(r)]
+		if !ok {
+			continue
+		}
+		if unicode.IsUpper(r) {
+			high = unicode.ToUpper(high)
+		}
+		marked = append(marked, high)
+	}
+	if len(marked) == 0 {
+		marked = []rune{highRunes['a']}
+	}
+	for i := 0; len(marked) < minBinaryMarkerRunes; i++ {
+		marked = append(marked, marked[i])
+	}
+	return string(marked)
+}
+
 func newPDFWriter(writer io.Writer) *pdfWriter {
+	return newPDFWriterLabel(writer, DefaultBinaryMarkerLabel)
+}
+
+// newPDFWriterLabel is newPDFWriter with an explicit binary-marker label; an
+// empty label falls back to DefaultBinaryMarkerLabel.
+func newPDFWriterLabel(writer io.Writer, label string) *pdfWriter {
+	if label == "" {
+		label = DefaultBinaryMarkerLabel
+	}
 	w := &pdfWriter{
 		w:          writer,
 		objOffsets: []int{0, 0, 0}, // catalog, metadata, page tree
@@ -86,7 +149,7 @@ func newPDFWriter(writer io.Writer) *pdfWriter {
 		subset:     true,
 	}
 
-	w.write("%%PDF-1.7\n%%Ŧǟċơ\n")
+	w.write("%%PDF-1.7\n%%%s\n", binaryMarker(label))
 	return w
 }
 

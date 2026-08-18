@@ -13,6 +13,12 @@ import (
 type Options struct {
 	Compress    bool
 	SubsetFonts bool
+
+	// BinaryMarkerLabel names the comment written directly after the PDF
+	// header (see binaryMarker). Empty uses DefaultBinaryMarkerLabel, which
+	// reproduces the marker this writer has always emitted.
+	BinaryMarkerLabel string
+
 	cimage.ImageEncoding
 }
 
@@ -36,7 +42,7 @@ func New(w io.Writer, width, height float64, opts *Options) *PDF {
 		opts = &defaultOptions
 	}
 
-	page := newPDFWriter(w).NewPage(width, height)
+	page := newPDFWriterLabel(w, opts.BinaryMarkerLabel).NewPage(width, height)
 	page.pdf.SetCompression(opts.Compress)
 	page.pdf.SetFontSubsetting(opts.SubsetFonts)
 	return &PDF{
