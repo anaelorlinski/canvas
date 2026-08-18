@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/tdewolff/canvas"
 	cimage "github.com/tdewolff/canvas/image"
@@ -62,6 +63,38 @@ func TestPDFPath(t *testing.T) {
 	pdf.SetLineJoin(canvas.RoundJoin)
 	pdf.SetDashes(2.0, []float64{1.0, 2.0, 3.0})
 	test.String(t, pdf.String(), " 2.8346457 0 0 2.8346457 0 0 cm /A0 gs 1 0 0 rg /A1 gs 0 0 1 RG 5 w 1 J 1 j [1 2 3 1 2 3] 2 d")
+}
+
+// TestBinaryMarker checks the invariant the PDF header comment relies on:
+// whatever the label, the result is at least four characters and every one of
+// them is above U+007F, so the file is recognised as binary (PDF 32000-1
+// §7.5.2). Short and unmappable labels are the interesting cases.
+func TestBinaryMarker(t *testing.T) {
+	for _, label := range []string{DefaultBinaryMarkerLabel, "ao", "a", "", "42 %", "Anael Orlinski"} {
+		marker := binaryMarker(label)
+
+		n := 0
+		for _, r := range marker {
+			test.That(t, r > unicode.MaxASCII, "marker for ", label, " has ASCII rune ", r)
+			n++
+		}
+		test.That(t, minBinaryMarkerRunes <= n, "marker for ", label, " has only ", n, " characters")
+		test.That(t, !strings.ContainsAny(marker, "\r\n"), "marker for ", label, " would end the comment")
+	}
+
+	// Case is carried across, so a label reads back recognisably.
+	test.String(t, binaryMarker("aaoo"), "ǟǟơơ")
+	test.String(t, binaryMarker("AAOO"), "ǞǞƠƠ")
+}
+
+// TestPDFHeader pins the header bytes: "%PDF-1.7" then a comment line whose
+// content is the binary marker.
+func TestPDFHeader(t *testing.T) {
+	buf := &bytes.Buffer{}
+	newPDFWriter(buf)
+	// The default label must keep reproducing the marker this writer has
+	// always emitted, so the refactor is invisible to existing output.
+	test.String(t, buf.String(), "%PDF-1.7\n%\u0166\u01df\u010b\u01a1\n")
 }
 
 const fontDir = "../../resources/"
