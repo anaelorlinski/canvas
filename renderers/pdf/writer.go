@@ -465,7 +465,7 @@ func subsetTag(fontProgram []byte) string {
 	var tag [6]byte
 	checksum := crc32.ChecksumIEEE(fontProgram)
 	for i := 0; i < 6; i++ {
-		tag[i] = 'A' + checksum[i]%26
+		tag[i] = 'A' + byte(checksum%26)
 		checksum >>= 5 // divide by 32, 6 times comes to 2^30, inside the checksum range
 	}
 	return string(tag[:])
@@ -1196,9 +1196,18 @@ func (w *pdfPageWriter) SetFill(fill canvas.Paint, m canvas.Matrix) {
 	} else {
 		if fill.Equal(w.fill) {
 			return
-		} else if fill.Color.A == 0 {
+		}
+		a := float64(fill.Color.A) / 255.0
+		if a == 0.0 {
+			// Color is premultiplied, so a fully transparent paint has
+			// zero components too and un-premultiplying is 0/0 — NaN,
+			// which is not a PDF number. Viewers read it as an operator
+			// and abandon the rest of the content stream, losing every
+			// object drawn after this point on the page. The paint is
+			// invisible whatever color we name, so name black and let
+			// the ExtGState alpha below do the hiding.
 			fmt.Fprintf(w, " 0 g")
-		} else if a := float64(fill.Color.A) / 255.0; fill.Color.R == fill.Color.G && fill.Color.R == fill.Color.B {
+		} else if fill.Color.R == fill.Color.G && fill.Color.R == fill.Color.B {
 			fmt.Fprintf(w, " %v g", dec(float64(fill.Color.R)/255.0/a))
 		} else {
 			fmt.Fprintf(w, " %v %v %v rg", dec(float64(fill.Color.R)/255.0/a), dec(float64(fill.Color.G)/255.0/a), dec(float64(fill.Color.B)/255.0/a))
@@ -1218,9 +1227,14 @@ func (w *pdfPageWriter) SetStroke(stroke canvas.Paint, m canvas.Matrix) {
 	} else {
 		if stroke.Equal(w.stroke) {
 			return
-		} else if stroke.Color.A == 0 {
+		}
+		a := float64(stroke.Color.A) / 255.0
+		if a == 0.0 {
+			// See SetFill: un-premultiplying a fully transparent paint
+			// is 0/0, and NaN in the content stream costs the rest of
+			// the page.
 			fmt.Fprintf(w, " 0 G")
-		} else if a := float64(stroke.Color.A) / 255.0; stroke.Color.R == stroke.Color.G && stroke.Color.R == stroke.Color.B {
+		} else if stroke.Color.R == stroke.Color.G && stroke.Color.R == stroke.Color.B {
 			fmt.Fprintf(w, " %v G", dec(float64(stroke.Color.R)/255.0/a))
 		} else {
 			fmt.Fprintf(w, " %v %v %v RG", dec(float64(stroke.Color.R)/255.0/a), dec(float64(stroke.Color.G)/255.0/a), dec(float64(stroke.Color.B)/255.0/a))
