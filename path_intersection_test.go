@@ -635,6 +635,9 @@ func TestBentleyOttmannSortV(t *testing.T) {
 }
 
 func TestBentleyOttmannPrecision(t *testing.T) {
+	if UseClipper2 {
+		t.Skip("tests the sweep's tolerance-square snapping at a unit grid; the integer engine drops rings thinner than two grid units by design")
+	}
 	var tts = []struct {
 		p  string
 		op pathOp

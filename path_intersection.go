@@ -1807,6 +1807,9 @@ var _op pathOp
 var _fillRule FillRule
 
 func bentleyOttmann(ps, qs Paths, op pathOp, fillRule FillRule) Paths {
+	if UseClipper2 {
+		return clipper2BooleanOp(ps, qs, op, fillRule)
+	}
 	// TODO: add grid spacing argument
 	// TODO: add Intersects/Touches functions (return bool)
 	// TODO: add Intersections function (return []Point)
