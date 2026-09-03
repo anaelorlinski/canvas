@@ -330,6 +330,11 @@ func (f *Font) SetFeatures(features string) {
 	f.features = features
 }
 
+// Features returns the OpenType feature string set via SetFeatures.
+func (f *Font) Features() string {
+	return f.features
+}
+
 // Face gets the font face given by the font size in points and its style. Fill can be any of Paint, color.Color, or canvas.Pattern.
 func (f *Font) Face(size float64, ifill any, deco ...FontDecorator) *FontFace {
 	face := &FontFace{}
@@ -349,6 +354,8 @@ func (f *Font) Face(size float64, ifill any, deco ...FontDecorator) *FontFace {
 	}
 	face.Deco = deco
 	face.Hinting = font.VerticalHinting
+	face.Features = f.features
+	face.Variations = f.variations
 	face.MmPerEm = face.Size / float64(face.Font.Head.UnitsPerEm)
 	return face
 }
@@ -377,6 +384,11 @@ func (family *FontFamily) Destroy() {
 }
 
 // Name returns the name of the font family.
+// Len returns the number of fonts loaded into this family.
+func (family *FontFamily) Len() int {
+	return len(family.fonts)
+}
+
 func (family *FontFamily) Name() string {
 	return family.name
 }
@@ -596,6 +608,8 @@ func (family *FontFamily) Face(size float64, args ...any) *FontFace {
 		face.XOffset = int32(float64(xOffset) / scale)
 		face.YOffset = int32(float64(yOffset) / scale)
 	}
+	face.Features = face.Font.features
+	face.Variations = face.Font.variations
 	face.MmPerEm = face.Size / float64(face.Font.Head.UnitsPerEm)
 	return face
 }
@@ -628,6 +642,14 @@ type FontFace struct {
 	Language  string
 	Script    text.Script
 	Direction text.Direction // TODO: really needed here?
+
+	// OpenType features and variations are snapshotted per-face at
+	// FontFace construction (from the underlying Font's settings at
+	// that moment). This decouples per-cell shaping settings from the
+	// shared *Font, so two faces over the same Font with different
+	// font-variant-* values don't clobber each other.
+	Features   string
+	Variations string
 
 	// letter spacing
 	// stroke and stroke color
@@ -705,7 +727,7 @@ func (face *FontFace) LineHeight() float64 {
 
 func (face *FontFace) Glyphs(s string) []text.Glyph {
 	ppem := face.PPEM(DefaultResolution)
-	return face.Font.shaper.Shape(s, ppem, face.Direction, face.Script, face.Language, face.Font.features, face.Font.variations)
+	return face.Font.shaper.Shape(s, ppem, face.Direction, face.Script, face.Language, face.Features, face.Variations)
 }
 
 // TextWidth returns the width of a given string in millimeters.

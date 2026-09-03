@@ -337,7 +337,7 @@ func NewTextLine(face *FontFace, s string, halign TextAlign) *Text {
 				line := line{y: y, spans: []TextSpan{}}
 				for _, item := range itemizeString(s[i:j]) {
 					direction, _ := scriptDirection(HorizontalTB, Natural, item.Script, item.Level, face.Direction)
-					glyphs := face.Font.shaper.Shape(item.Text, ppem, direction, face.Script, face.Language, face.Font.features, face.Font.variations)
+					glyphs := face.Font.shaper.Shape(item.Text, ppem, direction, face.Script, face.Language, face.Features, face.Variations)
 					width := face.textWidth(glyphs)
 					line.spans = append(line.spans, TextSpan{
 						X:         x,
@@ -688,7 +688,7 @@ func (rt *RichText) ToText(width, height float64, halign, valign TextAlign, opts
 	glyphs := make([]text.Glyph, 0, len(logRunes))
 	for _, run := range runs {
 		ppem := run.Face.PPEM(DefaultResolution)
-		glyphRun := run.Face.Font.shaper.Shape(run.Text, ppem, run.Direction, run.Script, run.Face.Language, run.Face.Font.features, run.Face.Font.variations)
+		glyphRun := run.Face.Font.shaper.Shape(run.Text, ppem, run.Direction, run.Script, run.Face.Language, run.Face.Features, run.Face.Variations)
 		for i := range glyphRun {
 			glyph := &glyphRun[i]
 			glyph.SFNT = run.Face.Font.SFNT
