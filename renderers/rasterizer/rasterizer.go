@@ -549,6 +549,9 @@ func (r *Rasterizer) RenderPatternFill(tile *canvas.Canvas, tileW, tileH float64
 
 	// tileView undoes any inherited parent CTM so the tile content
 	// renders in pure tile-local coords.
+	if tileW*subRes.DPMM() < 1 || tileH*subRes.DPMM() < 1 {
+		return // the tile is smaller than a pixel: nothing visible to tile
+	}
 	sub := New(tileW, tileH, subRes, r.colorSpace)
 	tile.RenderViewTo(sub, tileView)
 	sub.Close()
