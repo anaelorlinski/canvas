@@ -3,6 +3,7 @@ module github.com/tdewolff/canvas
 go 1.26.0
 
 require (
+	github.com/anaelorlinski/clipper2 v0.0.0
 	fyne.io/fyne/v2 v2.8.0
 	gioui.org v0.10.2
 	github.com/ByteArena/poly2tri-go v0.0.0-20170716161910-d102ad91854f
@@ -102,3 +103,5 @@ replace github.com/anaelorlinski/otf2ttf-go => ../otf2ttf-go
 
 // use the sibling fork (carries SubsetOptions.Desubroutinize); the parent module has its own replace
 replace github.com/tdewolff/font => ../font
+
+replace github.com/anaelorlinski/clipper2 => ../clipper2
