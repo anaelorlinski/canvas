@@ -803,16 +803,62 @@ func (face *FontFace) Decorate(width float64) *Path {
 }
 
 func (face *FontFace) RenderTo(r Renderer, m Matrix, s string, resolution Resolution) {
-	face.renderTo(r, m, face.Glyphs(s), face.PPEM(resolution))
+	face.renderTo(r, m, face.Glyphs(s), face.PPEM(resolution), resolution)
 }
 
-func (face *FontFace) renderTo(r Renderer, m Matrix, glyphs []text.Glyph, ppem uint16) {
+// gridSnapsVertically reports whether glyphs drawn with this face under m
+// should be aligned to the device pixel grid.
+//
+// A zero resolution means there is no device grid to snap to, so nothing is
+// snapped. HasRotation is checked rather than a single off-diagonal term:
+// under any rotation or shear the baseline is no longer axis-aligned and
+// shifting y does not put anything on a pixel boundary.
+//
+// Hinting gates this despite there being no hinter in the stack -- the value
+// is threaded through to ToPath and never read. Treat it as the on/off switch
+// for grid snapping, which is what it has always actually controlled.
+func (face *FontFace) gridSnapsVertically(resolution Resolution, m Matrix) bool {
+	return resolution != 0.0 && face.Hinting != font.NoHinting && !m.HasRotation()
+}
+
+// gridSnapDeltaY returns the offset to add to a baseline at local coordinate y
+// so that, once m has been applied, it lands on the device pixel grid.
+//
+// The matrix is part of the calculation, not just the resolution. Callers place
+// glyphs through m, so the position that has to be on a pixel boundary is
+// m[1][1]*y + m[1][2], not y: rounding y itself only aligns anything when m has
+// unit y-scale. A caller that renders a scaled canvas -- laying content out at
+// one size and drawing it at another -- otherwise rounds in the pre-scale space
+// and has the scale immediately undo it, displacing the baseline by up to half
+// a grid step times the scale while aligning nothing. The delta is returned in
+// local space, so it is divided back through the scale.
+//
+// The pitch is the output resolution. It is deliberately not derived from ppem
+// (as ppem/Size), which is a different and coarser grid: PPEM truncates
+// resolution.DPMM()*Size to a whole number, so ppem/Size and DPMM agree only
+// when that product happens to be an integer -- at 96 DPI and 12 pt they are
+// 6.25% apart. Snapping to a grid that is not the one being rasterized to
+// cannot sharpen anything, and PPEM's own comment notes it is "for hinting
+// purposes only".
+func gridSnapDeltaY(y float64, m Matrix, resolution Resolution) float64 {
+	sy := m[1][1]
+	if sy == 0.0 {
+		return 0.0 // degenerate; nothing to align
+	}
+	dpmm := resolution.DPMM()
+	pos := sy*y + m[1][2]
+	return (math.Round(pos*dpmm)/dpmm - pos) / sy
+}
+
+func (face *FontFace) renderTo(r Renderer, m Matrix, glyphs []text.Glyph, ppem uint16, resolution Resolution) {
 	p, width := face.toPath(glyphs, ppem)
-	if ppem != 0 && face.Hinting != font.NoHinting && !m.HasRotation() {
-		// grid-align vertically on pixel raster, this improves font sharpness
-		dpmm := float64(ppem) / face.MmPerEm / float64(face.Font.Head.UnitsPerEm)
-		_, dy := m.Pos()
-		m = m.Translate(0.0, float64(int(dy*dpmm+0.5))/dpmm-dy)
+	if face.gridSnapsVertically(resolution, m) {
+		// grid-align vertically on pixel raster, this improves font sharpness.
+		// Text.renderLineTo must snap identically; both go through the helpers
+		// above so the same string cannot grid-fit differently depending on
+		// which entry point drew it.
+		// glyphs are emitted at m's origin, so the baseline is local y = 0
+		m = m.Translate(0.0, gridSnapDeltaY(0.0, m, resolution))
 	}
 	if face.Deco != nil {
 		for _, deco := range face.Deco {

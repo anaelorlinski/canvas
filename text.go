@@ -1311,11 +1311,12 @@ func (t *Text) renderLineTo(r Renderer, m Matrix, resolution Resolution, index i
 		if t.WritingMode != HorizontalTB {
 			x, y = line.y, -span.X
 		}
-		if resolution != 0.0 && span.Face.Hinting != font.NoHinting && span.Rotation == text.NoRotation && Equal(m[1][0], 0.0) {
-			// grid-align vertically on pixel raster, this improves font sharpness
-			_, dy := m.Pos()
-			dy += y
-			y += float64(int(dy*resolution.DPMM()+0.5))/resolution.DPMM() - dy
+		if span.Rotation == text.NoRotation && span.Face.gridSnapsVertically(resolution, m) {
+			// grid-align vertically on pixel raster, this improves font
+			// sharpness. Shared with FontFace.renderTo so that the same string
+			// cannot grid-fit differently depending on whether it is drawn
+			// through Text or through FontFace directly.
+			y += gridSnapDeltaY(y, m, resolution)
 		}
 		xs[i] = x
 		ys[i] = y
