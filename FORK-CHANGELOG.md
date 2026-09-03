@@ -11,6 +11,122 @@ preserved, and are only listed here when a semantic merge changed something obse
 
 ---
 
+## 2026-09-04 — replay onto `origin/master` @ `dae8cd8` (branch `ao3`)
+
+Previous base `0338c27` → new base `dae8cd8` (4 upstream commits). Built as a **new branch**,
+`ao3`, rather than a rebase of `ao2` — `ao2` is untouched and still available. 20 fork commits
+reviewed one at a time: 15 replayed, 1 split, 4 dropped. Per-commit reasoning is in
+`FORK-ao3.md`.
+
+### Required: run `go mod tidy` in the consuming module
+
+`go mod tidy -diff` in `canvas-compositor` wants `github.com/anaelorlinski/clipper2` moved from a
+direct to an indirect requirement — canvas now pulls it in itself (opt-in Clipper2 backend), so
+the parent no longer needs it as a direct dependency:
+
+```diff
+ require (
+-	github.com/anaelorlinski/clipper2 v0.0.0
+ 	…
+ )
+ require (
++	github.com/anaelorlinski/clipper2 v0.0.0 // indirect
+```
+
+Nothing else in the module graph moved because of this branch. (A `golang.org/x/tools` /
+`x/mod` / `x/sync` addition also shows in the same diff; that belongs to the parent's own
+`docs/bo-engines/maprange` tool and is unrelated.)
+
+### Source break: `canvas.Stop` gains a third field
+
+`Stop` now carries `N`, the CSS Images 3 colour-transition-hint exponent. **Unkeyed literals stop
+compiling:**
+
+```go
+canvas.Stop{0.5, red}                    // before: fine.  now: too few values in struct literal
+canvas.Stop{Offset: 0.5, Color: red}     // the fix
+```
+
+Keyed literals and all `Grad.Add` / `Grad.AddStop` callers are unaffected. `N == 0` means
+"unset" and interpolates linearly, so behaviour is unchanged unless you set it.
+
+### New API
+
+- `PDF.SetProducer(string)` — override the `/Producer` metadata field; defaults to
+  `"tdewolff/canvas"` as before.
+- `PDF.AddOutlinePage(name string, level, page int, y float64)` — outline entry targeting an
+  explicit 0-based page, so an outline can be emitted after all pages are laid out.
+  `AddOutline` is unchanged and now delegates to it.
+- `Grad.AddStop(t float64, c color.RGBA, n float64)` — appends rather than replacing at a
+  duplicate offset (hard transitions), and carries the interpolation exponent.
+- `Options.BinaryMarkerLabel`, `Options.DisableCFFToTrueType`, `Options.DisableDesubroutinizeCFF`
+  on the PDF renderer. All zero values preserve previous behaviour.
+- `FontFamily.Len() int`, `Font.Features() string`, and `FontFace.Features` /
+  `FontFace.Variations` — OpenType settings are now snapshotted per face at construction rather
+  than read off the shared `*Font` at shaping time, so two faces over one `Font` no longer
+  clobber each other's `font-variant-*` settings.
+
+### Behaviour changes visible in output
+
+- **PDF gradients now carry stop alpha.** Stops sharing one alpha use `/ca`/`/CA`; stops with
+  differing alpha get a `/S/Luminosity` soft mask. A semi-transparent gradient previously
+  painted fully opaque. **Any PDF golden file containing a gradient will differ.**
+- **PDF text embeds CFF/OpenType fonts as TrueType by default** (`CIDFontType2` + `FontFile2`
+  instead of `CIDFontType0` + `FontFile3`), which is smaller and prints correctly on RIPs that
+  garble CFF. Set `DisableCFFToTrueType` to opt out. **PDF size and font-stream golden files
+  will differ.**
+- **Raster gradients are supersampled** at 3x3 sub-pixel offsets, antialiasing hard colour
+  stops. Smooth gradients are visually unchanged but not byte-identical. **Raster goldens
+  containing gradients may differ by a few LSBs.**
+- **SVG import keeps duplicate-offset stops**, so `<stop offset="50%"/>` pairs now render as the
+  hard transition they describe instead of collapsing to the last colour.
+
+Known limitation: SVG *export* cannot carry the `N` hint — an SVG `<stop>` has no field for it.
+Hinted gradients are exact on raster and PDF, linear in exported SVG.
+
+### Absent in `ao3` but present in `ao2` — read this if you are moving between the branches
+
+These are not upstream changes; they are fork behaviours that were deliberately not carried.
+
+- **`Font.HasFeature` and `Shaper.HasFeature` are gone, and `font-variant-caps` is no longer
+  synthesized** when a font lacks `smcp`/`c2sc`/`pcap`/`c2pc`/`unic`/`titl`. The request
+  silently does nothing again, as upstream. The detection was a workaround for
+  `tdewolff/font` not parsing GSUB, and is deferred until that is fixed in the font library.
+  The per-face plumbing (`Len`, `Features`, `Variations`) *was* kept — see New API above.
+- **The Bentley-Ottmann shared-vertex panic is reachable again.** `Stroke` followed by
+  `Settle(Positive)` over dense geometry can panic with *"next node for result polygon is nil,
+  probably buggy intersection code"*. The backport of upstream PR #382 that suppressed it was
+  dropped; the PR is still open upstream.
+- **Vertical text grid-alignment follows upstream again** (snapping the baseline, not the glyph
+  top edge). Glyph positions move by up to half a device pixel vertically where the ascent is
+  not an integral number of pixels. **Raster and PDF goldens that pin text pixels will differ
+  from `ao2`.**
+
+### Now upstream
+
+- `9e3bf6f` "discard the trailing space run when measuring a line" was **taken by upstream
+  verbatim** — `origin/master` HEAD `dae8cd8` is that commit, same author and an identical
+  `git patch-id`. Dropped from the fork; the behaviour is unchanged because the code is in the
+  base.
+- `c81a1b5` "repair build breaks from upstream cleanup commits" is no longer needed. Upstream's
+  `524a157` fixes both breaks — the `subsetTag` CRC32 indexing with the identical line, and the
+  out-of-scope `a` in `SetFill`/`SetStroke` by hoisting it.
+- Upstream's `e7ff123` adopted this fork's recommendation for `FontStroke`, changing
+  `Decorate` to `Offset(w).Not(text)` (an outer ring). The fork's per-face `Stroke`/
+  `StrokeWidth` fields remain, because they serve the CSS *centered, over-fill* case the
+  decorator interface cannot express.
+
+### Dependency notes
+
+`../font` is unchanged at `dccf325` and still provides `SubsetOptions.Desubroutinize`, which the
+CFF→TrueType path needs. `../clipper2` moved to `e4e5ab8` during this work; because the
+`replace` is by directory that takes effect with no version bump, and it only affects the opt-in
+Clipper2 backend (`CANVAS_CLIPPER2=1`), which is **off by default and still WIP** — 23 subtests
+fail with it enabled. Note that Go's test cache does not key on environment variables, so
+measuring that backend requires `-count=1`.
+
+---
+
 ## 2026-08-14 — rebase onto `origin/master` @ `bd13cbc`
 
 Previous base `248e2450` → new base `bd13cbc` (5 upstream commits). 17 fork commits
