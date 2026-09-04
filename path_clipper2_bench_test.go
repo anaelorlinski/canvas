@@ -68,42 +68,40 @@ func TestClipper2AdapterPhases(t *testing.T) {
 		}
 		subject := europe
 		clip := chile
-		scale := clipper2Scale()
-		var subj64, clip64 clipper2.Paths64
-		flat := func(paths Paths) [][]Point {
-			var out [][]Point
+		flat := func(paths Paths) clipper2.PathsD {
+			var out clipper2.PathsD
 			for _, p := range paths {
 				for _, sp := range p.Split() {
-					pts, _ := clipper2FlatPoints(sp.Flatten(Tolerance))
-					if len(pts) > 0 {
-						out = append(out, pts)
-					}
+					pts, _ := clipper2PathD(sp.Flatten(Tolerance))
+					out = append(out, pts)
 				}
 			}
 			return out
 		}
+		var subjD, clipD clipper2.PathsD
 		input := best(func() {
-			subj64 = clipper2ToPaths64(flat(subject), scale)
-			clip64 = clipper2ToPaths64(flat(clip), scale)
+			subjD = flat(subject)
+			clipD = flat(clip)
 		})
-		var tree *clipper2.PolyTree64
+		var r clipper2.ResultD
 		engine := best(func() {
-			c := clipper2.NewClipper64()
-			c.AddSubject(subj64)
-			c.AddClip(clip64)
-			tree, _, _ = c.ExecuteTree(clipper2.Union, clipper2.NonZero)
+			r, _ = clipper2.BooleanPolygonsD(clipper2.Union, clipper2.NonZero, subjD, nil, clipD, clipper2Conventions(true))
 		})
 		output := best(func() {
-			var rs Paths
-			clipper2TreeToPaths(tree, scale, &rs)
-			slices.SortStableFunc(rs, clipper2CompareStart)
+			rs := make(Paths, 0, len(r.Polygons))
+			for _, poly := range r.Polygons {
+				R := clipper2Path(poly.Outer, true)
+				for _, h := range poly.Holes {
+					R = R.Append(clipper2Path(h, true))
+				}
+				rs = append(rs, R)
+			}
 		})
-		var adapter, sweep float64
 		old := UseClipper2
 		UseClipper2 = true
-		adapter = best(func() { subject.Or(clip) })
+		adapter := best(func() { subject.Or(clip) })
 		UseClipper2 = false
-		sweep = best(func() { subject.Or(clip) })
+		sweep := best(func() { subject.Or(clip) })
 		UseClipper2 = old
 		t.Logf("%4d %8d | %8.3f %8.3f %8.3f %8.3f | %8.3f %8.3f", z, points, input, engine, output, input+engine+output, adapter, sweep)
 	}
