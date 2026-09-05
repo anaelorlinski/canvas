@@ -411,6 +411,17 @@ func (q *SweepEvents) AddPathEndpoints(p *Path, seg int, clipping bool) int {
 		i += n
 		seg++
 
+		// The sweep decides verticality with an exact comparison, but only snaps coordinates to
+		// the grid after the intersection phase. A segment whose endpoints share a grid column is
+		// therefore driven through the sweep as left-to-right, and turns vertical the moment it
+		// is split; a piece that becomes vertical while pointing downwards has to be reversed to
+		// keep left-endpoints at the bottom, which is impossible once its left-endpoint is in the
+		// sweep status. Make it vertical up front, which moves a point no further than the
+		// snapping that follows the sweep would.
+		if start.X != end.X && snap(start.X, BentleyOttmannEpsilon) == snap(end.X, BentleyOttmannEpsilon) {
+			end.X = start.X
+		}
+
 		if start == end {
 			// skip zero-length lineTo or close command
 			continue
