@@ -11,6 +11,44 @@ preserved, and are only listed here when a semantic merge changed something obse
 
 ---
 
+## 2026-09-05 — the Clipper2 engine is the default boolean backend (branch `ao3`, no rebase)
+
+`canvas.UseClipper2` now defaults to true: `Settle`, `And`, `Or`, `Xor`, `Not` and `DivideBy`
+run through the integer-grid Clipper2 engine (`path_clipper2.go`) instead of the
+floating-point Bentley-Ottmann sweep. The sweep stays in the code for comparison.
+
+### Behavior change visible in output
+
+The filled regions are identical between the two engines; the vertices of a result can
+differ from the sweep's by up to one grid unit of `BentleyOttmannEpsilon` (1e-8) where the
+two engines round a crossing differently, and the engine drops zero-area input paths and
+merges overlapping edges where the sweep kept their vertices. Output that embeds path
+coordinates at that precision (SVG or PDF path data compared as text) can therefore change
+on some inputs; rendered output does not. Twenty of the package's own golden strings were
+regenerated to the engine's output (`path_intersection_test.go`: `TestPathSettle`,
+`TestPathOr`, `TestBentleyOttmannPerformance`); `Clipper2SweepNumerics` in
+`path_clipper2.go` explains each differing vertex. `TestBentleyOttmannPrecision` is skipped
+under the engine, as before.
+
+### What the consumer sees
+
+Built the parent `canvas-compositor` against this branch: `go build ./...` and its test
+packages (the main package, `internal/layouttest`, `internal/server`) pass. The
+`internal/drawtest` failures (pixel checks in `absolute_test.go` and `float_test.go`) are
+identical with `CANVAS_CLIPPER2=0` and with the engine, pixel for pixel, so they predate this
+change; `docs/bo-engines/maprange`, `docs/bo-ladder` and `internal/drawtest/diagtmp` do not
+build for reasons of their own (a missing `golang.org/x/tools` requirement, stale tool code).
+No source or module-graph change is needed.
+
+### To keep the sweep
+
+Set `canvas.UseClipper2 = false` at start-up, before any path operation runs, or export
+`CANVAS_CLIPPER2=0` for the process; the switch is read once when the package initialises
+and is not safe to flip while operations run on other goroutines. With the sweep, the
+twenty regenerated golden strings of this package fail.
+
+---
+
 ## 2026-09-04 — replay onto `origin/master` @ `dae8cd8` (branch `ao3`)
 
 Previous base `0338c27` → new base `dae8cd8` (4 upstream commits). Built as a **new branch**,

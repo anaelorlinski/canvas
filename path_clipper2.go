@@ -8,9 +8,11 @@ import (
 )
 
 // UseClipper2 routes Settle and the boolean path operations through the integer-grid Clipper2
-// engine instead of the floating-point Bentley-Ottmann sweep. Experimental. It is enabled at
-// start-up when the environment variable CANVAS_CLIPPER2 is "1".
-var UseClipper2 = os.Getenv("CANVAS_CLIPPER2") == "1"
+// engine instead of the floating-point Bentley-Ottmann sweep. On by default; the sweep is
+// kept for comparison and is selected by setting this to false at start-up, or by the
+// environment variable CANVAS_CLIPPER2 being "0" when the package initialises. The golden
+// strings of the package are the engine's.
+var UseClipper2 = os.Getenv("CANVAS_CLIPPER2") != "0"
 
 // Clipper2SweepNumerics makes the engine's output follow the sweep's numerics where the two
 // engines differ in nothing but a rounding choice, so that the golden strings written for the
@@ -26,9 +28,11 @@ var UseClipper2 = os.Getenv("CANVAS_CLIPPER2") == "1"
 //     nearest to the decimal value, the product is the sweep's.
 //
 // With the switch on, the engine's output equals the sweep's on every golden string of the
-// package except twenty, and those differ where the sweep's arithmetic, not a rounding
-// choice, decides. TestClipper2GoldenClassify (given a saved test log in CANVAS_GOLDEN_LOG)
-// explains every differing vertex; the 2026-09-04 run found 52 of them, of four kinds:
+// package except twenty, which differ where the sweep's arithmetic, not a rounding choice,
+// decides; since 2026-09-05 the engine is the default and those twenty strings are the
+// engine's (they fail under the sweep, CANVAS_CLIPPER2=0). TestClipper2GoldenClassify (given
+// a saved test log in CANVAS_GOLDEN_LOG) explains every differing vertex; the 2026-09-04 run
+// found 52 of them, of four kinds:
 //
 //   - 26 vertices the sweep has and the engine does not. The sweep keeps a two-point closed
 //     subpath, a zero-area segment, as a cutting segment and leaves a vertex wherever it
@@ -44,17 +48,15 @@ var UseClipper2 = os.Getenv("CANVAS_CLIPPER2") == "1"
 //   - 1 input vertex the sweep moved by three units with a tolerance square.
 //
 // None of these is a rounding choice the engine could make, so these twenty golden strings
-// differ under the engine whatever this switch says. They are the sweep's arithmetic written
-// down, not a geometric contract: every vertex of both engines lies within one grid unit of
-// the input boundary, and the filled regions are identical.
+// differ between the engines whatever this switch says. They were the sweep's arithmetic
+// written down, not a geometric contract: every vertex of both engines lies within one grid
+// unit of the input boundary, and the filled regions are identical.
 //
 // Turning this off gives upstream Clipper2's truncation and correctly rounded coordinates, the
 // engine's own numerics: the crossing rounding then changes 24 vertices and the coordinate
-// formula 12, by one unit or one ulp, in 21 golden strings. The golden strings that then
-// differ are legitimate engine results and should be regenerated with the engine on
-// (CANVAS_CLIPPER2=1), after which the sweep's expectations are only valid with the engine
-// off. TestBentleyOttmannPrecision is skipped under the engine in any case: it sets the
-// tolerance to a whole unit and checks the sweep's own snapping rules.
+// formula 12, by one unit or one ulp, in 21 golden strings, which would then need
+// regenerating once more. TestBentleyOttmannPrecision is skipped under the engine in any
+// case: it sets the tolerance to a whole unit and checks the sweep's own snapping rules.
 var Clipper2SweepNumerics = true
 
 // clipper2Conventions is what the sweep's contract asks of a result, expressed for the
